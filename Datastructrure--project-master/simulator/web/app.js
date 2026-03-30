@@ -115,6 +115,7 @@ const dom = {
   seedInput: document.getElementById("seedInput"),
   weatherSelect: document.getElementById("weatherSelect"),
   cityInput: document.getElementById("cityInput"),
+  districtInput: document.getElementById("districtInput"),
   collabInput: document.getElementById("collabInput"),
   runBtn: document.getElementById("runBtn"),
   mapModeBtn: document.getElementById("mapModeBtn"),
@@ -289,6 +290,9 @@ async function initialize() {
   dom.seedInput.value = String(meta.defaults.seed);
   if (dom.cityInput) {
     dom.cityInput.value = String(meta.defaults.city_name || "Shanghai");
+  }
+  if (dom.districtInput) {
+    dom.districtInput.value = String(meta.defaults.district_name || "");
   }
   dom.collabInput.checked = Boolean(meta.defaults.allow_collaboration);
   if (dom.mapModeBtn) {
@@ -589,7 +593,8 @@ function readMapPayload() {
   return {
     ...readCommonPayload(),
     map_mode: true,
-    city_name: String(dom.cityInput?.value || state.meta?.defaults?.city_name || "Shanghai").trim() || "Shanghai"
+    city_name: String(dom.cityInput?.value || state.meta?.defaults?.city_name || "Shanghai").trim() || "Shanghai",
+    district_name: String(dom.districtInput?.value || state.meta?.defaults?.district_name || "").trim()
   };
 }
 
@@ -660,9 +665,10 @@ async function runMapSimulation() {
   }
 
   const payload = readMapPayload();
+  const scopeLabel = payload.district_name ? `${payload.city_name}${payload.district_name}` : payload.city_name;
   showGeoMapPanel();
   setGeoLoading("正在生成地图场景...", true);
-  setStatus(`状态：正在生成 ${payload.city_name} 的高德地图仿真...`);
+  setStatus(`状态：正在生成 ${scopeLabel} 的高德地图仿真...`);
 
   try {
     const data = await postJson("/api/run", payload);
@@ -674,7 +680,7 @@ async function runMapSimulation() {
     dom.logBox.textContent = "";
     const fallbackMsg =
       state.lastMapRouteFailureCount > 0 ? `，其中 ${state.lastMapRouteFailureCount} 条路线回退为节点连线` : "";
-    setStatus(`状态：高德地图回放已生成，城市=${payload.city_name}，事件数=${state.events.length}${fallbackMsg}`);
+    setStatus(`状态：高德地图回放已生成，范围=${scopeLabel}，事件数=${state.events.length}${fallbackMsg}`);
   } catch (err) {
     hideGeoMapPanel();
     setGeoLoading("", false);
@@ -1164,7 +1170,9 @@ function updateGeoMapMeta() {
     return;
   }
   const city = state.scenario.city_name || "高德城市";
-  dom.geoMapMeta.textContent = `${city} | ${zhScale(state.scenario.map_mode === "amap" ? state.summary?.scenario || dom.scaleSelect.value : dom.scaleSelect.value)} | ${zhWeather(state.scenario.weather_mode || dom.weatherSelect.value)}`;
+  const district = String(state.scenario.district_name || "").trim();
+  const scope = district ? `${city}${district}` : city;
+  dom.geoMapMeta.textContent = `${scope} | ${zhScale(state.scenario.map_mode === "amap" ? state.summary?.scenario || dom.scaleSelect.value : dom.scaleSelect.value)} | ${zhWeather(state.scenario.weather_mode || dom.weatherSelect.value)}`;
 }
 
 function prepareReplayTimeline() {

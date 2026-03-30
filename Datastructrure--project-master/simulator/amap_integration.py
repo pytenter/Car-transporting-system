@@ -16,10 +16,12 @@ from .simulation import SCENARIO_SCALES, ScenarioData, _build_weather_rush_windo
 
 
 AMAP_PLACE_TEXT_URL = "https://restapi.amap.com/v3/place/text"
+AMAP_DISTRICT_URL = "https://restapi.amap.com/v3/config/district"
 AMAP_DIRECTION_URL = "https://restapi.amap.com/v3/direction/driving"
 AMAP_TIMEOUT_SEC = 12.0
 AMAP_MAX_WAYPOINTS = 16
 DEFAULT_CITY_NAME = "上海"
+DEFAULT_DISTRICT_NAME = ""
 
 DEPOT_KEYWORDS = ("物流园", "配送中心", "仓储中心", "工业园", "产业园")
 TASK_KEYWORDS = (
@@ -49,6 +51,14 @@ class AmapPoi:
     typecode: str
 
 
+@dataclass(frozen=True)
+class AmapScope:
+    city_name: str
+    district_name: str
+    search_code: str
+    display_name: str
+
+
 def has_amap_key() -> bool:
     return bool(_get_amap_key())
 
@@ -59,6 +69,7 @@ def build_amap_scenario(
     allow_collaboration: bool = False,
     weather_mode: str = "normal",
     city_name: str = DEFAULT_CITY_NAME,
+    district_name: str = DEFAULT_DISTRICT_NAME,
 ) -> ScenarioData:
     if not has_amap_key():
         raise RuntimeError("地图模式需要配置高德 Web 服务 Key。请设置环境变量 AMAP_KEY。")
@@ -68,11 +79,13 @@ def build_amap_scenario(
     scale = SCENARIO_SCALES[scale_name]
     rnd = random.Random(seed)
     city = (city_name or DEFAULT_CITY_NAME).strip() or DEFAULT_CITY_NAME
+    district = (district_name or DEFAULT_DISTRICT_NAME).strip()
+    scope = _resolve_scope(city=city, district=district)
 
-    depot_pool = _collect_city_pois(city=city, keywords=DEPOT_KEYWORDS, target_count=18, seed=seed + 11)
-    task_pool = _collect_city_pois(city=city, keywords=TASK_KEYWORDS, target_count=max(scale.tasks * 2, 60), seed=seed + 29)
+    depot_pool = _collect_city_pois(scope=scope, keywords=DEPOT_KEYWORDS, target_count=18, seed=seed + 11)
+    task_pool = _collect_city_pois(scope=scope, keywords=TASK_KEYWORDS, target_count=max(scale.tasks * 2, 60), seed=seed + 29)
     station_pool = _collect_city_pois(
-        city=city,
+        scope=scope,
         keywords=STATION_KEYWORDS,
         target_count=max(scale.stations * 4, 24),
         seed=seed + 41,
@@ -80,18 +93,18 @@ def build_amap_scenario(
 
     depot_poi = _pick_distinct_poi(depot_pool, excluded_ids=set(), rnd=rnd)
     if depot_poi is None:
-        raise RuntimeError(f"未能从高德地点检索到城市“{city}”的车库候选点。")
+        raise RuntimeError(f"未能从高德地点检索到范围“{scope.display_name}”的车库候选点。")
 
     excluded_ids = {depot_poi.poi_id}
     selected_task_pois = _pick_many_distinct(task_pool, scale.tasks, excluded_ids, rnd)
     if len(selected_task_pois) < scale.tasks:
-        raise RuntimeError(f"城市“{city}”可用任务地点不足，当前仅找到 {len(selected_task_pois)} 个。")
+        raise RuntimeError(f"范围“{scope.display_name}”可用任务地点不足，当前仅找到 {len(selected_task_pois)} 个。")
 
     selected_station_pois = _pick_many_distinct(station_pool, scale.stations, excluded_ids, rnd)
     if len(selected_station_pois) < scale.stations:
         selected_station_pois.extend(_pick_many_distinct(task_pool, scale.stations - len(selected_station_pois), excluded_ids, rnd))
     if len(selected_station_pois) < scale.stations:
-        raise RuntimeError(f"城市“{city}”可用充电站地点不足，当前仅找到 {len(selected_station_pois)} 个。")
+        raise RuntimeError(f"范围“{scope.display_name}”可用充电站地点不足，当前仅找到 {len(selected_station_pois)} 个。")
 
     all_places = [depot_poi, *selected_task_pois, *selected_station_pois]
     graph = WeightedGraph()
@@ -206,7 +219,8 @@ def build_amap_scenario(
         rush_windows=_build_weather_rush_windows(scale=scale, rnd=rnd, weather_mode=weather_mode),
         weather_mode=weather_mode,
         map_mode="amap",
-        city_name=city,
+        city_name=scope.city_name,
+        district_name=scope.district_name,
         route_provider="amap",
     )
 
@@ -280,13 +294,109 @@ def fetch_route_geometry(waypoints: Sequence[Sequence[float]], strategy: str = "
     return result
 
 
-def _collect_city_pois(city: str, keywords: Iterable[str], target_count: int, seed: int) -> List[AmapPoi]:
+def _resolve_scope(city: str, district: str) -> AmapScope:
+    city_clean = (city or DEFAULT_CITY_NAME).strip() or DEFAULT_CITY_NAME
+    district_clean = (district or DEFAULT_DISTRICT_NAME).strip()
+    payload = _amap_request(
+        AMAP_DISTRICT_URL,
+        {
+            "key": _get_amap_key(),
+            "keywords": city_clean,
+            "subdistrict": "1",
+            "extensions": "base",
+            "output": "json",
+        },
+    )
+    if str(payload.get("status")) != "1":
+        raise RuntimeError(str(payload.get("info") or f"高德行政区解析失败: {city_clean}"))
+
+    city_items = [item for item in (payload.get("districts") or []) if isinstance(item, dict)]
+    city_match = _pick_admin_match(city_items, city_clean)
+    city_name_resolved = str((city_match or {}).get("name") or city_clean).strip() or city_clean
+    city_adcode = str((city_match or {}).get("adcode") or "").strip()
+
+    if not district_clean:
+        return AmapScope(
+            city_name=city_name_resolved,
+            district_name="",
+            search_code=city_adcode or city_clean,
+            display_name=city_name_resolved,
+        )
+
+    children = [item for item in ((city_match or {}).get("districts") or []) if isinstance(item, dict)]
+    district_match = _pick_admin_match(children, district_clean)
+    if district_match is not None:
+        district_name_resolved = str(district_match.get("name") or district_clean).strip() or district_clean
+        district_adcode = str(district_match.get("adcode") or "").strip()
+        if district_adcode:
+            return AmapScope(
+                city_name=city_name_resolved,
+                district_name=district_name_resolved,
+                search_code=district_adcode,
+                display_name=f"{city_name_resolved}{district_name_resolved}",
+            )
+
+    return AmapScope(
+        city_name=city_name_resolved,
+        district_name=district_clean,
+        search_code=f"{city_name_resolved}{district_clean}",
+        display_name=f"{city_name_resolved}{district_clean}",
+    )
+
+
+def _pick_admin_match(items: Sequence[dict], target_name: str) -> dict | None:
+    target = str(target_name or "").strip()
+    if not target:
+        return items[0] if items else None
+    normalized_target = _normalize_admin_name(target)
+
+    exact_matches = []
+    normalized_matches = []
+    fuzzy_matches = []
+    for item in items:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        normalized_name = _normalize_admin_name(name)
+        if name == target:
+            exact_matches.append(item)
+            continue
+        if normalized_name and normalized_name == normalized_target:
+            normalized_matches.append(item)
+            continue
+        if target in name or name in target or (normalized_target and normalized_target in normalized_name):
+            fuzzy_matches.append(item)
+
+    if exact_matches:
+        return exact_matches[0]
+    if normalized_matches:
+        return normalized_matches[0]
+    if fuzzy_matches:
+        return fuzzy_matches[0]
+    return items[0] if items else None
+
+
+def _normalize_admin_name(value: str) -> str:
+    text = str(value or "").strip().replace(" ", "")
+    suffixes = ["特别行政区", "自治州", "自治县", "开发区", "高新区", "新区", "城区", "地区", "盟", "市", "区", "县"]
+    changed = True
+    while changed and text:
+        changed = False
+        for suffix in suffixes:
+            if text.endswith(suffix) and len(text) > len(suffix):
+                text = text[: -len(suffix)]
+                changed = True
+                break
+    return text
+
+
+def _collect_city_pois(scope: AmapScope, keywords: Iterable[str], target_count: int, seed: int) -> List[AmapPoi]:
     rnd = random.Random(seed)
     merged: List[AmapPoi] = []
     seen: set[str] = set()
     for keyword in keywords:
         for page in range(1, 5):
-            rows = _search_text_pois(city=city, keyword=keyword, page=page, offset=25)
+            rows = _search_text_pois(scope=scope, keyword=keyword, page=page, offset=25)
             if not rows:
                 break
             rnd.shuffle(rows)
@@ -323,12 +433,12 @@ def _pick_distinct_poi(pool: Sequence[AmapPoi], excluded_ids: set[str], rnd: ran
     return rnd.choice(candidates)
 
 
-def _search_text_pois(city: str, keyword: str, page: int, offset: int) -> List[AmapPoi]:
+def _search_text_pois(scope: AmapScope, keyword: str, page: int, offset: int) -> List[AmapPoi]:
     payload = _amap_request(
         AMAP_PLACE_TEXT_URL,
         {
             "key": _get_amap_key(),
-            "city": city,
+            "city": scope.search_code,
             "keywords": keyword,
             "citylimit": "true",
             "offset": str(offset),

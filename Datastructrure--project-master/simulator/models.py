@@ -139,6 +139,7 @@ class SimulationConfig:
     weather_mode: str = "normal"
     map_mode: str = "synthetic"
     city_name: str = ""
+    district_name: str = ""
     route_provider: str = "graph"
 
 
