@@ -1,0 +1,23 @@
+[
+  {
+    "scenario": "small",
+    "strategy": "nearest_task_first",
+    "mode": "dynamic",
+    "completed": 14,
+    "unserved": 0,
+    "overtime": 0,
+    "distance": 1188.2408865217542,
+    "avg_response_time": 53.426688278090054,
+    "charging_wait": 9.882985620638067,
+    "score": 2274.0690385049306,
+    "score_std": 596.224250577716,
+    "station_utilization": {
+      "0": 0.0,
+      "1": 0.0,
+      "2": 0.0
+    },
+    "seed": 20260309,
+    "seed_runs": 2,
+    "allow_collaboration": true
+  }
+]

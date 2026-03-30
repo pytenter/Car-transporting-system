@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>新能源车队调度 · 可视化控制台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="hero">
+      <div class="hero-copy">
+        <p class="hero-kicker">智能调度控制台</p>
+        <h1>
+          <span class="title-main">新能源车队调度</span>
+          <span class="title-sub">仿真与对比</span>
+        </h1>
+        <p class="hero-subtitle">支持仿真回放、多策略基准测试与充电网络相关统计展示。</p>
+      </div>
+    </header>
+
+    <section class="controls card">
+      <label>
+        场景规模
+        <select id="scaleSelect"></select>
+      </label>
+      <label>
+        调度策略
+        <select id="strategySelect"></select>
+      </label>
+      <label>
+        随机种子
+        <input id="seedInput" type="number" value="20260309">
+      </label>
+      <label>
+        天气路况
+        <select id="weatherSelect">
+          <option value="normal">晴朗</option>
+          <option value="rain">雨天</option>
+          <option value="congestion">拥堵</option>
+        </select>
+      </label>
+      <label class="checkbox">
+        <input id="collabInput" type="checkbox" checked>
+        允许多车协同（超重任务）
+      </label>
+      <button id="runBtn">运行仿真</button>
+      <button id="compareBtn" class="ghost">策略对比排名</button>
+      <button id="playBtn">播放回放</button>
+      <button id="pauseBtn" class="ghost">暂停</button>
+      <button id="stepBtn" class="ghost">单步</button>
+      <button id="resetBtn" class="ghost">重置回放</button>
+    </section>
+
+    <section class="card replay-demo-bar" aria-label="回放演示">
+      <div class="replay-demo-row">
+        <label>
+          回放速度
+          <select id="replaySpeedSelect" title="数值越大，时间走得越快">
+            <option value="0.5">0.5× 慢放（适合讲解）</option>
+            <option value="1" selected>1× 正常</option>
+            <option value="1.5">1.5×</option>
+            <option value="2">2× 快进</option>
+          </select>
+        </label>
+        <button type="button" id="mapFullscreenBtn" class="ghost">地图全屏</button>
+      </div>
+      <div
+        class="replay-progress"
+        role="progressbar"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow="0"
+        aria-label="回放进度"
+      >
+        <div id="replayProgressFill" class="replay-progress-fill"></div>
+      </div>
+      <div id="replayProgressLabel" class="replay-progress-label">尚未加载回放</div>
+      <p class="demo-hint">
+        演示快捷键：<kbd>空格</kbd> 播放/暂停 · <kbd>→</kbd> 单步 · <kbd>R</kbd> 重置 · <kbd>F</kbd> 地图全屏
+      </p>
+    </section>
+
+    <main class="workspace">
+      <section class="left-pane">
+        <section class="map-wrap card">
+          <div id="weatherFx" class="weather-fx normal" aria-hidden="true"></div>
+          <svg id="mapSvg" viewBox="0 0 1000 700" aria-label="调度地图">
+            <defs>
+              <filter id="lineGlow" x="-20%" y="-20%" width="140%" height="140%">
+                <feDropShadow dx="0" dy="0" stdDeviation="2" flood-color="#8cb3ff" flood-opacity="0.55"></feDropShadow>
+              </filter>
+            </defs>
+            <g id="edgesLayer"></g>
+            <g id="historyLayer"></g>
+            <g id="tasksLayer"></g>
+            <g id="stationsLayer"></g>
+            <g id="depotLayer"></g>
+            <g id="activeRouteLayer"></g>
+            <g id="carLayer"></g>
+          </svg>
+
+          <div class="legend">
+            <span><i class="dot pending"></i>待处理任务</span>
+            <span><i class="dot done"></i>已完成任务</span>
+            <span><i class="icon car"></i>车辆动画</span>
+            <span><i class="icon station"></i>充电站</span>
+          </div>
+        </section>
+
+        <section class="card stats stats-bottom">
+          <h2>实时指标</h2>
+          <div id="summaryBox">状态：尚未开始</div>
+          <ul id="metricsList"></ul>
+        </section>
+      </section>
+
+      <aside class="side-wrap">
+
+        <section class="card vehicle-status">
+          <h2>车辆状态</h2>
+          <div id="vehicleStatusList" class="status-list empty">请先运行仿真以查看车辆状态</div>
+        </section>
+
+        <section class="card task-list">
+          <h2>任务列表</h2>
+          <div id="taskListBox" class="status-list empty">请先运行仿真以查看任务</div>
+        </section>
+
+        <section class="card ranking">
+          <h2>策略排名</h2>
+          <div id="rankingList" class="ranking-list empty">点击「策略对比排名」生成排名</div>
+        </section>
+
+        <section class="card logs">
+          <h2>回放日志</h2>
+          <pre id="logBox"></pre>
+        </section>
+      </aside>
+    </main>
+
+    <section class="card benchmark-panel">
+      <h2>基准测试结果可视化</h2>
+      <div class="benchmark-controls">
+        <label>
+          数据文件
+          <select id="benchmarkDataset"></select>
+        </label>
+        <label>
+          场景筛选
+          <select id="benchmarkScenario"></select>
+        </label>
+        <label>
+          指标
+          <select id="benchmarkMetric"></select>
+        </label>
+        <label>
+          表格规模
+          <select id="benchmarkTableScale">
+            <option value="all">全部</option>
+            <option value="small">小规模</option>
+            <option value="medium">中规模</option>
+            <option value="large">大规模</option>
+          </select>
+        </label>
+        <button id="refreshBenchmarkBtn" class="ghost">刷新数据</button>
+      </div>
+      <div id="benchmarkStatus" class="benchmark-status">尚未加载基准结果文件。</div>
+      <div id="benchmarkChart" class="benchmark-chart empty">请先在命令行运行基准测试生成 results 下的 JSON，再点击「刷新数据」。</div>
+      <div id="benchmarkTable" class="benchmark-table-wrap"></div>
+    </section>
+
+    <section class="card weather-panel">
+      <h2>天气路况统计</h2>
+      <div class="weather-controls">
+        <label>
+          表格规模
+          <select id="weatherStatsScale">
+            <option value="all">全部</option>
+            <option value="small">小规模</option>
+            <option value="medium">中规模</option>
+            <option value="large">大规模</option>
+          </select>
+        </label>
+        <label>
+          天气
+          <select id="weatherStatsWeather">
+            <option value="all">全部</option>
+            <option value="normal">晴朗</option>
+            <option value="rain">雨天</option>
+            <option value="congestion">拥堵</option>
+          </select>
+        </label>
+        <button id="runWeatherStatsBtn" class="ghost">刷新天气统计</button>
+      </div>
+      <div id="weatherStatsStatus" class="weather-status">正在从 results/weather_stats.json 加载缓存…</div>
+      <div id="weatherStatsTable" class="benchmark-table-wrap"></div>
+    </section>
+
+    <footer id="statusBar">状态：等待运行仿真</footer>
+  </div>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
