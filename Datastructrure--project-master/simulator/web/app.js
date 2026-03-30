@@ -2,6 +2,11 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const MAP_WIDTH = 1000;
 const MAP_HEIGHT = 700;
 const MAP_PADDING = 42;
+const GEO_TILE_SIZE = 256;
+const GEO_MAP_PADDING = 56;
+const GEO_TILE_URL_TEMPLATE = "https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}";
+const GEO_TILE_SUBDOMAINS = ["1", "2", "3", "4"];
+const GEO_ROUTE_FETCH_CONCURRENCY = 4;
 const REPLAY_SIM_TIME_TO_MS = 78;
 /** 连续播放时降低侧栏刷新频率，减轻 DOM 压力，演示更流畅 */
 const REPLAY_SIDE_PANEL_THROTTLE_MS = 120;
@@ -109,8 +114,10 @@ const dom = {
   strategySelect: document.getElementById("strategySelect"),
   seedInput: document.getElementById("seedInput"),
   weatherSelect: document.getElementById("weatherSelect"),
+  cityInput: document.getElementById("cityInput"),
   collabInput: document.getElementById("collabInput"),
   runBtn: document.getElementById("runBtn"),
+  mapModeBtn: document.getElementById("mapModeBtn"),
   compareBtn: document.getElementById("compareBtn"),
   playBtn: document.getElementById("playBtn"),
   pauseBtn: document.getElementById("pauseBtn"),
@@ -144,13 +151,26 @@ const dom = {
   weatherStatsWeather: document.getElementById("weatherStatsWeather"),
   weatherFx: document.getElementById("weatherFx"),
   mapSvg: document.getElementById("mapSvg"),
+  geoMapPanel: document.getElementById("geoMapPanel"),
+  geoMapMeta: document.getElementById("geoMapMeta"),
+  geoMapCloseBtn: document.getElementById("geoMapCloseBtn"),
+  geoMapViewport: document.getElementById("geoMapViewport"),
+  geoMapTiles: document.getElementById("geoMapTiles"),
+  geoMapOverlay: document.getElementById("geoMapOverlay"),
+  geoMapLoading: document.getElementById("geoMapLoading"),
   edgesLayer: document.getElementById("edgesLayer"),
   historyLayer: document.getElementById("historyLayer"),
   tasksLayer: document.getElementById("tasksLayer"),
   stationsLayer: document.getElementById("stationsLayer"),
   depotLayer: document.getElementById("depotLayer"),
   activeRouteLayer: document.getElementById("activeRouteLayer"),
-  carLayer: document.getElementById("carLayer")
+  carLayer: document.getElementById("carLayer"),
+  geoHistoryLayer: document.getElementById("geoHistoryLayer"),
+  geoTasksLayer: document.getElementById("geoTasksLayer"),
+  geoStationsLayer: document.getElementById("geoStationsLayer"),
+  geoDepotLayer: document.getElementById("geoDepotLayer"),
+  geoActiveRouteLayer: document.getElementById("geoActiveRouteLayer"),
+  geoCarLayer: document.getElementById("geoCarLayer")
 };
 
 const state = {
@@ -182,7 +202,15 @@ const state = {
   replayLoggedTaskIds: new Set(),
   preDispatchView: false,
   weatherStatsData: null,
-  lastSidePanelPaintAt: 0
+  lastSidePanelPaintAt: 0,
+  mapReplayEnabled: false,
+  geoRouteCache: new Map(),
+  geoRoutePending: new Map(),
+  geoRouteFailures: new Set(),
+  geoView: null,
+  geoViewSignature: "",
+  geoTilesSignature: "",
+  lastMapRouteFailureCount: 0
 };
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -194,13 +222,24 @@ window.addEventListener("DOMContentLoaded", () => {
 
 function bindEvents() {
   dom.runBtn.addEventListener("click", () => void runSimulation());
+  dom.mapModeBtn?.addEventListener("click", () => void runMapSimulation());
   dom.compareBtn.addEventListener("click", () => void compareStrategies());
   dom.playBtn.addEventListener("click", () => void playReplay());
   dom.pauseBtn.addEventListener("click", pauseReplay);
   dom.stepBtn.addEventListener("click", () => void stepReplay());
   dom.resetBtn.addEventListener("click", resetReplay);
   dom.mapFullscreenBtn?.addEventListener("click", () => void toggleMapFullscreen());
+  dom.geoMapCloseBtn?.addEventListener("click", hideGeoMapPanel);
   document.addEventListener("keydown", onDemoHotkey);
+  window.addEventListener("resize", () => {
+    if (!isGeoReplayAvailable()) {
+      return;
+    }
+    state.geoView = null;
+    state.geoViewSignature = "";
+    state.geoTilesSignature = "";
+    renderGeoReplayFrame(state.routeHistory, []);
+  });
   dom.refreshBenchmarkBtn.addEventListener("click", () => void loadBenchmarks());
   dom.runWeatherStatsBtn.addEventListener("click", () => void loadWeatherStats());
   dom.weatherSelect.addEventListener("change", () => {
@@ -248,8 +287,16 @@ async function initialize() {
     "all"
   );
   dom.seedInput.value = String(meta.defaults.seed);
+  if (dom.cityInput) {
+    dom.cityInput.value = String(meta.defaults.city_name || "Shanghai");
+  }
   dom.collabInput.checked = Boolean(meta.defaults.allow_collaboration);
+  if (dom.mapModeBtn) {
+    dom.mapModeBtn.disabled = !Boolean(meta.map_mode_available);
+    dom.mapModeBtn.title = meta.map_mode_available ? "使用高德地图生成真实地点与路线回放" : "未检测到 AMAP_KEY，地图模式不可用";
+  }
   setWeatherEffect(dom.weatherSelect.value);
+  updateMapModeButton();
 
   await loadBenchmarks();
   await loadWeatherStats();
@@ -538,8 +585,106 @@ function readCommonPayload() {
   };
 }
 
+function readMapPayload() {
+  return {
+    ...readCommonPayload(),
+    map_mode: true,
+    city_name: String(dom.cityInput?.value || state.meta?.defaults?.city_name || "Shanghai").trim() || "Shanghai"
+  };
+}
+
+function isGeoScenario() {
+  return Boolean(state.scenario && String(state.scenario.map_mode || "") === "amap");
+}
+
+function isGeoReplayAvailable() {
+  return Boolean(state.mapReplayEnabled && isGeoScenario());
+}
+
+function updateMapModeButton() {
+  if (!dom.mapModeBtn) {
+    return;
+  }
+  const active = isGeoReplayAvailable();
+  dom.mapModeBtn.textContent = active ? "地图模式中" : "地图模式";
+  dom.mapModeBtn.classList.toggle("active", active);
+  dom.mapModeBtn.setAttribute("aria-pressed", active ? "true" : "false");
+}
+
+function showGeoMapPanel() {
+  state.mapReplayEnabled = true;
+  dom.mapWrap?.classList.add("geo-active");
+  if (dom.geoMapPanel) {
+    dom.geoMapPanel.hidden = false;
+    dom.geoMapPanel.setAttribute("aria-hidden", "false");
+  }
+  updateMapModeButton();
+}
+
+function hideGeoMapPanel() {
+  state.mapReplayEnabled = false;
+  dom.mapWrap?.classList.remove("geo-active");
+  if (dom.geoMapPanel) {
+    dom.geoMapPanel.hidden = true;
+    dom.geoMapPanel.setAttribute("aria-hidden", "true");
+  }
+  updateMapModeButton();
+}
+
+function setGeoLoading(message = "", visible = true) {
+  if (!dom.geoMapLoading) {
+    return;
+  }
+  dom.geoMapLoading.hidden = !visible;
+  if (message) {
+    dom.geoMapLoading.textContent = message;
+  }
+}
+
+function refreshCurrentReplayFrame() {
+  if (!state.scenario) {
+    return;
+  }
+  renderReplayAt(state.currentTime, {
+    appendLogs: false,
+    initialSummary: state.currentTime <= 1e-9,
+    preDispatch: state.preDispatchView,
+    throttleSidePanels: true
+  });
+}
+
+async function runMapSimulation() {
+  if (!state.meta?.map_mode_available) {
+    setStatus("状态：地图模式不可用，请先配置 AMAP_KEY", true);
+    return;
+  }
+
+  const payload = readMapPayload();
+  showGeoMapPanel();
+  setGeoLoading("正在生成地图场景...", true);
+  setStatus(`状态：正在生成 ${payload.city_name} 的高德地图仿真...`);
+
+  try {
+    const data = await postJson("/api/run", payload);
+    hydrateRunData(data);
+    showGeoMapPanel();
+    await ensureGeoReplayReady();
+    renderStaticMapBase();
+    renderReplayAt(0, { appendLogs: false, initialSummary: true, preDispatch: true });
+    dom.logBox.textContent = "";
+    const fallbackMsg =
+      state.lastMapRouteFailureCount > 0 ? `，其中 ${state.lastMapRouteFailureCount} 条路线回退为节点连线` : "";
+    setStatus(`状态：高德地图回放已生成，城市=${payload.city_name}，事件数=${state.events.length}${fallbackMsg}`);
+  } catch (err) {
+    hideGeoMapPanel();
+    setGeoLoading("", false);
+    setStatus(`状态：地图模式失败 - ${err.message}`, true);
+  }
+}
+
 async function runSimulation() {
   const payload = readCommonPayload();
+  hideGeoMapPanel();
   setStatus("状态：仿真运行中…");
 
   try {
@@ -575,6 +720,13 @@ function hydrateRunData(data) {
   state.replayLastFrameTs = 0;
   state.replayRafId = null;
   state.preDispatchView = false;
+  state.geoRouteCache = new Map();
+  state.geoRoutePending = new Map();
+  state.geoRouteFailures = new Set();
+  state.geoView = null;
+  state.geoViewSignature = "";
+  state.geoTilesSignature = "";
+  state.lastMapRouteFailureCount = 0;
 
   state.nodeMap = new Map();
   state.scenario.nodes.forEach((node) => state.nodeMap.set(node.node_id, node));
@@ -604,6 +756,7 @@ function hydrateRunData(data) {
   state.projection = buildProjection(state.scenario.nodes);
   setWeatherEffect(state.scenario.weather_mode || dom.weatherSelect.value);
   prepareReplayTimeline();
+  setGeoLoading("", false);
 }
 
 async function compareStrategies() {
@@ -830,12 +983,188 @@ function restoreVehicleStateToInitial() {
 function renderStaticMapBase() {
   if (!state.scenario || !state.projection) {
     clearMapLayers();
+    clearGeoMapLayers();
     return;
   }
   clearMapLayers();
   drawEdges();
   drawStations();
   drawDepot();
+  if (isGeoReplayAvailable()) {
+    renderGeoReplayFrame([], []);
+  } else {
+    clearGeoMapLayers();
+  }
+}
+
+async function ensureGeoReplayReady() {
+  if (!isGeoScenario()) {
+    clearGeoMapLayers();
+    setGeoLoading("", false);
+    return;
+  }
+
+  showGeoMapPanel();
+  updateGeoMapMeta();
+  state.geoView = null;
+  state.geoViewSignature = "";
+  state.geoTilesSignature = "";
+  prepareReplayTimeline();
+  renderGeoReplayFrame([], []);
+  setGeoLoading("", false);
+}
+
+function collectUniqueGeoRoutes() {
+  const unique = new Map();
+  (state.events || []).forEach((event) => {
+    const routes = Array.isArray(event.routes) ? event.routes : [];
+    routes.forEach((route) => {
+      const routeNodes = Array.isArray(route.route_nodes) ? route.route_nodes.map((nodeId) => Number(nodeId)) : [];
+      if (routeNodes.length < 2) {
+        return;
+      }
+      const routeKey = String(route.route_key || routeNodes.join("-"));
+      if (!unique.has(routeKey)) {
+        unique.set(routeKey, { routeKey, routeNodes });
+      }
+    });
+  });
+  return Array.from(unique.values());
+}
+
+function applyGeoRoutesToEvents() {
+  (state.events || []).forEach((event) => {
+    const routes = Array.isArray(event.routes) ? event.routes : [];
+    routes.forEach((route) => {
+      const routeNodes = Array.isArray(route.route_nodes) ? route.route_nodes.map((nodeId) => Number(nodeId)) : [];
+      const routeKey = String(route.route_key || routeNodes.join("-"));
+      const cached = state.geoRouteCache.get(routeKey);
+      route.display_points = cached?.coordinates ? cached.coordinates.map((point) => [...point]) : routeNodePairs(routeNodes);
+    });
+  });
+}
+
+async function loadGeoRoute(routeKey, routeNodes) {
+  const cached = state.geoRouteCache.get(routeKey);
+  if (cached) {
+    return cached;
+  }
+  const pending = state.geoRoutePending.get(routeKey);
+  if (pending) {
+    return pending;
+  }
+
+  const task = (async () => {
+    const fallbackCoordinates = routeNodePairs(routeNodes);
+    if (fallbackCoordinates.length < 2) {
+      const result = { coordinates: fallbackCoordinates, fallback: true };
+      state.geoRouteCache.set(routeKey, result);
+      state.geoRouteFailures.add(routeKey);
+      return result;
+    }
+
+    try {
+      const data = await postJson("/api/route-geometry", { waypoints: fallbackCoordinates });
+      const coordinates = normalizeGeoCoordinatePairs(data.coordinates);
+      const result = {
+        coordinates: coordinates.length >= 2 ? coordinates : fallbackCoordinates,
+        fallback: coordinates.length < 2
+      };
+      state.geoRouteCache.set(routeKey, result);
+      if (result.fallback) {
+        state.geoRouteFailures.add(routeKey);
+      } else {
+        state.geoRouteFailures.delete(routeKey);
+      }
+      applyGeoRoutesToEvents();
+      state.lastMapRouteFailureCount = state.geoRouteFailures.size;
+      if (isGeoReplayAvailable()) {
+        refreshCurrentReplayFrame();
+      }
+      return result;
+    } catch (_err) {
+      const result = { coordinates: fallbackCoordinates, fallback: true };
+      state.geoRouteCache.set(routeKey, result);
+      state.geoRouteFailures.add(routeKey);
+      applyGeoRoutesToEvents();
+      state.lastMapRouteFailureCount = state.geoRouteFailures.size;
+      if (isGeoReplayAvailable()) {
+        refreshCurrentReplayFrame();
+      }
+      return result;
+    } finally {
+      state.geoRoutePending.delete(routeKey);
+    }
+  })();
+
+  state.geoRoutePending.set(routeKey, task);
+  return task;
+}
+
+async function runConcurrent(items, limit, worker) {
+  const total = Array.isArray(items) ? items.length : 0;
+  if (!total) {
+    return;
+  }
+  let cursor = 0;
+  const runners = Array.from({ length: Math.min(Math.max(1, limit), total) }, async () => {
+    while (cursor < total) {
+      const index = cursor;
+      cursor += 1;
+      await worker(items[index], index, total);
+    }
+  });
+  await Promise.all(runners);
+}
+
+function normalizeGeoCoordinatePairs(points) {
+  if (!Array.isArray(points)) {
+    return [];
+  }
+  const normalized = [];
+  points.forEach((point) => {
+    if (!Array.isArray(point) || point.length < 2) {
+      return;
+    }
+    const lng = numberValue(point[0]);
+    const lat = numberValue(point[1]);
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) {
+      return;
+    }
+    const pair = [Number(lng.toFixed(6)), Number(lat.toFixed(6))];
+    const previous = normalized[normalized.length - 1];
+    if (!previous || previous[0] !== pair[0] || previous[1] !== pair[1]) {
+      normalized.push(pair);
+    }
+  });
+  return normalized;
+}
+
+function routeNodePairs(routeNodes) {
+  if (!Array.isArray(routeNodes)) {
+    return [];
+  }
+  const pairs = [];
+  routeNodes.forEach((nodeId) => {
+    const node = state.nodeMap.get(Number(nodeId));
+    if (!node) {
+      return;
+    }
+    const pair = [numberValue(node.x), numberValue(node.y)];
+    const previous = pairs[pairs.length - 1];
+    if (!previous || previous[0] !== pair[0] || previous[1] !== pair[1]) {
+      pairs.push(pair);
+    }
+  });
+  return pairs;
+}
+
+function updateGeoMapMeta() {
+  if (!dom.geoMapMeta || !state.scenario) {
+    return;
+  }
+  const city = state.scenario.city_name || "高德城市";
+  dom.geoMapMeta.textContent = `${city} | ${zhScale(state.scenario.map_mode === "amap" ? state.summary?.scenario || dom.scaleSelect.value : dom.scaleSelect.value)} | ${zhWeather(state.scenario.weather_mode || dom.weatherSelect.value)}`;
 }
 
 function prepareReplayTimeline() {
@@ -881,7 +1210,7 @@ function prepareReplayTimeline() {
     const routes = Array.isArray(event.routes) ? event.routes : [];
     routes.forEach((route) => {
       const routeNodes = Array.isArray(route.route_nodes) ? route.route_nodes.map((nodeId) => Number(nodeId)) : [];
-      const points = routeToPoints(routeNodes);
+      const points = routeToPoints(routeNodes, route);
       if (!points.length) {
         return;
       }
@@ -924,6 +1253,7 @@ function prepareReplayTimeline() {
         taskId,
         dispatch,
         completion,
+        routeRef: route,
         routeNodes,
         points,
         cumulative: metrics.cumulative,
@@ -1070,7 +1400,8 @@ function renderReplayAt(simTime, options = {}) {
     routes.forEach((route) => {
       dispatchedRoutes.push({
         vehicle_id: Number(route.vehicle_id),
-        route_nodes: Array.isArray(route.route_nodes) ? route.route_nodes : []
+        route_nodes: Array.isArray(route.route_nodes) ? route.route_nodes : [],
+        display_points: Array.isArray(route.display_points) ? route.display_points : []
       });
     });
   });
@@ -1120,7 +1451,16 @@ function renderReplayAt(simTime, options = {}) {
     );
     const dist = mission.totalDistancePx * progress;
     const point = sampleAtDistance(mission.points, mission.cumulative, dist);
-    cars.push({ vehicleId: mission.vehicleId, point });
+    const geoCoordinates = routeCoordinates(mission.routeRef);
+    const geoProjected = geoCoordinates.map((pair) => projectGeoPoint(pair[0], pair[1])).filter(Boolean);
+    const geoMetrics = pathMetrics(geoProjected.length ? geoProjected : mission.points);
+    const geoDist = geoMetrics.total * progress;
+    const geoPoint = sampleAtDistance(
+      geoProjected.length ? geoProjected : mission.points,
+      geoMetrics.cumulative.length ? geoMetrics.cumulative : mission.cumulative,
+      geoDist
+    );
+    cars.push({ vehicleId: mission.vehicleId, point, geoPoint });
 
     if (vehicle) {
       vehicle.battery = mission.batteryAtTime(target);
@@ -1137,7 +1477,8 @@ function renderReplayAt(simTime, options = {}) {
   renderReplayLayers(
     activeMissions.map((mission) => ({
       vehicle_id: mission.vehicleId,
-      route_nodes: mission.routeNodes
+      route_nodes: mission.routeNodes,
+      display_points: Array.isArray(mission.routeRef?.display_points) ? mission.routeRef.display_points : []
     })),
     cars
   );
@@ -1181,6 +1522,123 @@ function renderReplayLayers(activeRoutes, cars) {
     const car = createCar(carInfo.vehicleId);
     placeCar(car, carInfo.point);
     dom.carLayer.appendChild(car);
+  });
+  renderGeoReplayFrame(activeRoutes, cars);
+}
+
+function clearGeoMapLayers() {
+  dom.geoHistoryLayer && (dom.geoHistoryLayer.innerHTML = "");
+  dom.geoTasksLayer && (dom.geoTasksLayer.innerHTML = "");
+  dom.geoStationsLayer && (dom.geoStationsLayer.innerHTML = "");
+  dom.geoDepotLayer && (dom.geoDepotLayer.innerHTML = "");
+  dom.geoActiveRouteLayer && (dom.geoActiveRouteLayer.innerHTML = "");
+  dom.geoCarLayer && (dom.geoCarLayer.innerHTML = "");
+}
+
+function renderGeoReplayFrame(activeRoutes, cars) {
+  if (!dom.geoMapOverlay || !dom.geoMapViewport) {
+    return;
+  }
+  clearGeoMapLayers();
+  if (!isGeoReplayAvailable() || !state.scenario) {
+    if (dom.geoMapTiles) {
+      dom.geoMapTiles.innerHTML = "";
+    }
+    return;
+  }
+  const view = ensureGeoView();
+  if (!view) {
+    return;
+  }
+  renderGeoTiles(view);
+  queueGeoRouteRequests(activeRoutes);
+  dom.geoMapOverlay.setAttribute("viewBox", `0 0 ${view.width} ${view.height}`);
+
+  state.routeHistory.forEach((route) => {
+    const points = routeToGeoPoints(route.route_nodes, route);
+    if (points.length < 2) {
+      return;
+    }
+    const polyline = svg("polyline", {
+      points: formatPoints(points),
+      fill: "none",
+      stroke: vehicleColor(route.vehicle_id),
+      "stroke-width": 2,
+      class: "route-history"
+    });
+    dom.geoHistoryLayer.appendChild(polyline);
+  });
+
+  state.scenario.tasks.forEach((task) => {
+    const node = state.nodeMap.get(task.node_id);
+    const point = node ? projectGeoPoint(node.x, node.y) : null;
+    if (!point) {
+      return;
+    }
+    const status = state.taskState.get(task.task_id) || "pending";
+    const dot = svg("circle", {
+      cx: point.x,
+      cy: point.y,
+      r: 5,
+      fill: status === "done" ? "#1D9B78" : status === "delivering" ? "#F4A23B" : "#DF5A67",
+      stroke: "#173954",
+      "stroke-width": 0.8
+    });
+    dom.geoTasksLayer.appendChild(dot);
+  });
+
+  state.scenario.stations.forEach((station) => {
+    const node = state.nodeMap.get(station.node_id);
+    const point = node ? projectGeoPoint(node.x, node.y) : null;
+    if (!point) {
+      return;
+    }
+    dom.geoStationsLayer.appendChild(stationIcon(point.x, point.y, station.station_id));
+  });
+
+  const depotNode = state.nodeMap.get(state.scenario.depot_node);
+  const depotPoint = depotNode ? projectGeoPoint(depotNode.x, depotNode.y) : null;
+  if (depotPoint) {
+    const depot = svg("g", { transform: `translate(${depotPoint.x} ${depotPoint.y})` });
+    depot.appendChild(
+      svg("path", {
+        d: "M-10 5 L0 -10 L10 5 V12 H-10 Z",
+        fill: "#1D3557",
+        stroke: "#14243D",
+        "stroke-width": 1
+      })
+    );
+    depot.appendChild(
+      svg("rect", {
+        x: -3,
+        y: 5,
+        width: 6,
+        height: 7,
+        fill: "#D9E6F2"
+      })
+    );
+    dom.geoDepotLayer.appendChild(depot);
+  }
+
+  activeRoutes.forEach((route) => {
+    const points = routeToGeoPoints(route.route_nodes, route);
+    if (points.length < 2) {
+      return;
+    }
+    const polyline = svg("polyline", {
+      points: formatPoints(points),
+      fill: "none",
+      stroke: vehicleColor(route.vehicle_id),
+      "stroke-width": 3.2,
+      class: "route-active"
+    });
+    dom.geoActiveRouteLayer.appendChild(polyline);
+  });
+
+  cars.forEach((carInfo) => {
+    const car = createCar(carInfo.vehicleId);
+    placeCar(car, carInfo.geoPoint || carInfo.point);
+    dom.geoCarLayer.appendChild(car);
   });
 }
 
@@ -1995,23 +2453,218 @@ function buildProjection(nodes) {
   return { minX, minY, scale, offsetX, offsetY };
 }
 
+function clampLatitude(lat) {
+  return Math.max(-85.05112878, Math.min(85.05112878, numberValue(lat)));
+}
+
+function lngLatToWorld(lng, lat, zoom) {
+  const scale = GEO_TILE_SIZE * (2 ** zoom);
+  const x = ((numberValue(lng) + 180) / 360) * scale;
+  const sinLat = Math.sin((clampLatitude(lat) * Math.PI) / 180);
+  const y = (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * scale;
+  return { x, y };
+}
+
+function geoViewportSize() {
+  const width = Math.max(320, Math.round(dom.geoMapViewport?.clientWidth || dom.mapSvg?.clientWidth || MAP_WIDTH));
+  const height = Math.max(240, Math.round(dom.geoMapViewport?.clientHeight || dom.mapSvg?.clientHeight || MAP_HEIGHT));
+  return { width, height };
+}
+
+function buildGeoView(nodes) {
+  if (!Array.isArray(nodes) || !nodes.length) {
+    return null;
+  }
+  const viewport = geoViewportSize();
+  let best = null;
+  for (let zoom = 15; zoom >= 3; zoom -= 1) {
+    const projected = nodes.map((node) => lngLatToWorld(node.x, node.y, zoom));
+    const xs = projected.map((point) => point.x);
+    const ys = projected.map((point) => point.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const spanX = Math.max(1, maxX - minX);
+    const spanY = Math.max(1, maxY - minY);
+    const fits = spanX <= viewport.width - GEO_MAP_PADDING * 2 && spanY <= viewport.height - GEO_MAP_PADDING * 2;
+    best = { zoom, minX, maxX, minY, maxY, spanX, spanY, width: viewport.width, height: viewport.height };
+    if (fits) {
+      break;
+    }
+  }
+  if (!best) {
+    return null;
+  }
+  const offsetX = (best.width - best.spanX) / 2 - best.minX;
+  const offsetY = (best.height - best.spanY) / 2 - best.minY;
+  return { ...best, offsetX, offsetY };
+}
+
+function ensureGeoView() {
+  if (!state.scenario?.nodes?.length) {
+    return null;
+  }
+  const viewport = geoViewportSize();
+  const signature = `${state.scenario.nodes.length}:${viewport.width}x${viewport.height}`;
+  if (state.geoView && state.geoViewSignature === signature) {
+    return state.geoView;
+  }
+  const view = buildGeoView(state.scenario.nodes);
+  state.geoView = view;
+  state.geoViewSignature = signature;
+  state.geoTilesSignature = "";
+  return view;
+}
+
+function projectGeoPoint(xValue, yValue) {
+  const view = state.geoView || ensureGeoView();
+  if (!view) {
+    return null;
+  }
+  const world = lngLatToWorld(xValue, yValue, view.zoom);
+  return {
+    x: world.x + view.offsetX,
+    y: world.y + view.offsetY
+  };
+}
+
+function geoTileUrl(x, y, zoom) {
+  const subdomain = GEO_TILE_SUBDOMAINS[Math.abs(x + y) % GEO_TILE_SUBDOMAINS.length];
+  return GEO_TILE_URL_TEMPLATE
+    .replace("{s}", subdomain)
+    .replace("{x}", String(x))
+    .replace("{y}", String(y))
+    .replace("{z}", String(zoom));
+}
+
+function renderGeoTiles(view) {
+  if (!dom.geoMapTiles || !view) {
+    return;
+  }
+  const left = -view.offsetX;
+  const top = -view.offsetY;
+  const right = left + view.width;
+  const bottom = top + view.height;
+  const tileCount = 2 ** view.zoom;
+  const minTileX = Math.floor(left / GEO_TILE_SIZE);
+  const maxTileX = Math.floor(right / GEO_TILE_SIZE);
+  const minTileY = Math.max(0, Math.floor(top / GEO_TILE_SIZE));
+  const maxTileY = Math.min(tileCount - 1, Math.floor(bottom / GEO_TILE_SIZE));
+  const signature = `${view.zoom}:${view.width}x${view.height}:${minTileX}-${maxTileX}:${minTileY}-${maxTileY}`;
+  if (state.geoTilesSignature === signature) {
+    return;
+  }
+  state.geoTilesSignature = signature;
+  dom.geoMapTiles.innerHTML = "";
+  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+      const wrappedX = ((tileX % tileCount) + tileCount) % tileCount;
+      const img = document.createElement("img");
+      img.className = "geo-map-tile";
+      img.alt = "";
+      img.loading = "lazy";
+      img.decoding = "async";
+      img.src = geoTileUrl(wrappedX, tileY, view.zoom);
+      img.style.left = `${tileX * GEO_TILE_SIZE + view.offsetX}px`;
+      img.style.top = `${tileY * GEO_TILE_SIZE + view.offsetY}px`;
+      dom.geoMapTiles.appendChild(img);
+    }
+  }
+}
+
+function queueGeoRouteRequests(activeRoutes) {
+  if (!isGeoReplayAvailable()) {
+    return;
+  }
+  const visible = new Map();
+  const history = state.routeHistory.slice(-24);
+  [...history, ...(activeRoutes || [])].forEach((route) => {
+    const routeNodes = Array.isArray(route.route_nodes) ? route.route_nodes.map((nodeId) => Number(nodeId)) : [];
+    if (routeNodes.length < 2) {
+      return;
+    }
+    const routeKey = String(route.route_key || routeNodes.join("-"));
+    if (Array.isArray(route.display_points) && route.display_points.length >= 2) {
+      return;
+    }
+    if (state.geoRouteCache.has(routeKey) || state.geoRoutePending.has(routeKey)) {
+      return;
+    }
+    visible.set(routeKey, routeNodes);
+  });
+  const pendingRoutes = Array.from(visible.entries()).slice(0, GEO_ROUTE_FETCH_CONCURRENCY);
+  pendingRoutes.forEach(([routeKey, routeNodes]) => {
+    void loadGeoRoute(routeKey, routeNodes);
+  });
+}
+
+function projectRawPoint(xValue, yValue) {
+  if (!state.projection) {
+    return null;
+  }
+  const x = state.projection.offsetX + (numberValue(xValue) - state.projection.minX) * state.projection.scale;
+  const y = MAP_HEIGHT - (state.projection.offsetY + (numberValue(yValue) - state.projection.minY) * state.projection.scale);
+  return { x, y };
+}
+
 function projectNode(nodeId) {
   const node = state.nodeMap.get(nodeId);
   if (!node || !state.projection) {
     return null;
   }
-  const x = state.projection.offsetX + (node.x - state.projection.minX) * state.projection.scale;
-  const y = MAP_HEIGHT - (state.projection.offsetY + (node.y - state.projection.minY) * state.projection.scale);
-  return { x, y };
+  return projectRawPoint(node.x, node.y);
 }
 
-function routeToPoints(routeNodes) {
-  if (!Array.isArray(routeNodes)) {
-    return [];
+function routeCoordinates(routeOrNodes) {
+  if (routeOrNodes && !Array.isArray(routeOrNodes) && Array.isArray(routeOrNodes.display_points) && routeOrNodes.display_points.length) {
+    return normalizeGeoCoordinatePairs(routeOrNodes.display_points);
   }
+  const routeNodes = Array.isArray(routeOrNodes)
+    ? routeOrNodes
+    : Array.isArray(routeOrNodes?.route_nodes)
+    ? routeOrNodes.route_nodes
+    : [];
+  return routeNodePairs(routeNodes);
+}
+
+function routeToPoints(routeNodes, routeMeta = null) {
   const points = [];
+  const coordinates = routeMeta ? routeCoordinates(routeMeta) : [];
+  if (coordinates.length) {
+    coordinates.forEach((pair) => {
+      const point = projectRawPoint(pair[0], pair[1]);
+      if (!point) {
+        return;
+      }
+      const prev = points[points.length - 1];
+      if (!prev || prev.x !== point.x || prev.y !== point.y) {
+        points.push(point);
+      }
+    });
+    return points;
+  }
+  if (!Array.isArray(routeNodes)) {
+    return points;
+  }
   routeNodes.forEach((nodeId) => {
     const point = projectNode(nodeId);
+    if (!point) {
+      return;
+    }
+    const prev = points[points.length - 1];
+    if (!prev || prev.x !== point.x || prev.y !== point.y) {
+      points.push(point);
+    }
+  });
+  return points;
+}
+
+function routeToGeoPoints(routeNodes, routeMeta = null) {
+  const coordinates = routeMeta ? routeCoordinates(routeMeta) : routeNodePairs(routeNodes);
+  const points = [];
+  coordinates.forEach((pair) => {
+    const point = projectGeoPoint(pair[0], pair[1]);
     if (!point) {
       return;
     }

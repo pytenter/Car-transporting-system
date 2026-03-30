@@ -27,6 +27,7 @@ class ScenarioData:
     vehicles: Dict[int, Vehicle]
     stations: Dict[int, ChargingStation]
     config: SimulationConfig
+    node_meta: Dict[int, dict] | None = None
 
 
 @dataclass
@@ -199,6 +200,9 @@ def build_scenario(
         depot_charge_ports=max(3, min(8, scale.vehicles // 3)),
         rush_windows=_build_weather_rush_windows(scale=scale, rnd=rnd, weather_mode=weather_mode),
         weather_mode=weather_mode,
+        map_mode="synthetic",
+        city_name="",
+        route_provider="graph",
     )
 
     tasks.sort(key=lambda item: (item.release_time, item.task_id))

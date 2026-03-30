@@ -40,11 +40,16 @@
           <option value="congestion">拥堵</option>
         </select>
       </label>
+      <label>
+        城市
+        <input id="cityInput" type="text" value="Shanghai">
+      </label>
       <label class="checkbox">
         <input id="collabInput" type="checkbox" checked>
         允许多车协同（超重任务）
       </label>
       <button id="runBtn">运行仿真</button>
+      <button id="mapModeBtn" class="ghost" type="button">地图模式</button>
       <button id="compareBtn" class="ghost">策略对比排名</button>
       <button id="playBtn">播放回放</button>
       <button id="pauseBtn" class="ghost">暂停</button>
@@ -99,6 +104,27 @@
             <g id="activeRouteLayer"></g>
             <g id="carLayer"></g>
           </svg>
+          <div id="geoMapPanel" class="geo-map-panel" hidden aria-hidden="true">
+            <div class="geo-map-toolbar">
+              <div class="geo-map-badge">
+                <strong>高德地图回放</strong>
+                <span id="geoMapMeta">等待生成地图仿真</span>
+              </div>
+              <button id="geoMapCloseBtn" class="ghost" type="button">关闭地图</button>
+            </div>
+            <div id="geoMapViewport" class="geo-map-viewport">
+              <div id="geoMapTiles" class="geo-map-tiles" aria-hidden="true"></div>
+              <svg id="geoMapOverlay" class="geo-map-overlay" aria-label="高德地图回放图层">
+                <g id="geoHistoryLayer"></g>
+                <g id="geoTasksLayer"></g>
+                <g id="geoStationsLayer"></g>
+                <g id="geoDepotLayer"></g>
+                <g id="geoActiveRouteLayer"></g>
+                <g id="geoCarLayer"></g>
+              </svg>
+              <div id="geoMapLoading" class="geo-map-loading" hidden>正在加载高德路线...</div>
+            </div>
+          </div>
 
           <div class="legend">
             <span><i class="dot pending"></i>待处理任务</span>

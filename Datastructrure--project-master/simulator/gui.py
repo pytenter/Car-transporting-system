@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Tuple, TypeVar
 from urllib.parse import urlparse
 
+from .amap_integration import DEFAULT_CITY_NAME, build_amap_scenario, fetch_route_geometry, has_amap_key
 from .exact_solver import HAS_CPLEX, solve_with_cplex
 from .simulation import SCENARIO_SCALES, WEATHER_MODES, FleetSimulator, ScenarioData, build_scenario, run_strategies_for_scenario
 from .strategies import (
@@ -75,8 +76,13 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                         "seed": 20260309,
                         "allow_collaboration": True,
                         "weather_mode": "normal",
+                        "map_mode": False,
+                        "city_name": DEFAULT_CITY_NAME,
                     },
                     "weather_modes": list(WEATHER_MODES),
+                    "map_mode_available": has_amap_key(),
+                    "route_provider": "amap" if has_amap_key() else "graph",
+                    "route_strategy_hint": "地图模式会使用高德地点与高德驾车路线；需要先配置环境变量 AMAP_KEY。",
                 }
             )
             return
@@ -101,22 +107,30 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        try:
+            if parsed.path == "/api/run":
+                payload = self._read_json_body()
+                response = _run_single_simulation(payload)
+                self._write_json(response)
+                return
 
-        if parsed.path == "/api/run":
-            payload = self._read_json_body()
-            response = _run_single_simulation(payload)
-            self._write_json(response)
-            return
-
-        if parsed.path == "/api/compare":
-            payload = self._read_json_body()
-            response = _compare_strategies(payload)
-            self._write_json(response)
-            return
-        if parsed.path == "/api/weather-stats":
-            payload = self._read_json_body()
-            response = _weather_stats(payload)
-            self._write_json(response)
+            if parsed.path == "/api/compare":
+                payload = self._read_json_body()
+                response = _compare_strategies(payload)
+                self._write_json(response)
+                return
+            if parsed.path == "/api/weather-stats":
+                payload = self._read_json_body()
+                response = _weather_stats(payload)
+                self._write_json(response)
+                return
+            if parsed.path == "/api/route-geometry":
+                payload = self._read_json_body()
+                response = _route_geometry(payload)
+                self._write_json(response)
+                return
+        except Exception as exc:
+            self._write_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
@@ -158,16 +172,18 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
 
 
 def _run_single_simulation(payload: dict) -> dict:
-    scale, seed, allow_collaboration, weather_mode = _extract_common_args(payload)
+    scale, seed, allow_collaboration, weather_mode, map_mode, city_name = _extract_common_args(payload)
     scenario_seed = _scenario_seed_for_scale(seed, scale)
     strategy_name = str(payload.get("strategy", "urgency_distance"))
     strategy = _build_strategy_instance(strategy_name, scenario_seed)
 
-    scenario = build_scenario(
-        scale_name=scale,
-        seed=scenario_seed,
+    scenario = _build_dashboard_scenario(
+        scale=scale,
+        scenario_seed=scenario_seed,
         allow_collaboration=allow_collaboration,
         weather_mode=weather_mode,
+        map_mode=map_mode,
+        city_name=city_name,
     )
     scenario_snapshot = copy.deepcopy(scenario)
     simulator = FleetSimulator(copy.deepcopy(scenario))
@@ -189,6 +205,7 @@ def _run_single_simulation(payload: dict) -> dict:
                     "vehicle_id": int(vehicle_id),
                     "task_id": int(event.task_id),
                     "route_nodes": list(route_nodes),
+                    "route_key": _route_key(route_nodes),
                     "station_id": event.station_by_vehicle.get(vehicle_id),
                     "travel_distance": float(event.travel_distance_by_vehicle.get(vehicle_id, 0.0)),
                     "completion_time": float(event.completion_time_by_vehicle.get(vehicle_id, event.completion_time)),
@@ -200,6 +217,7 @@ def _run_single_simulation(payload: dict) -> dict:
                     "charge_start_time": event.charge_start_time_by_vehicle.get(vehicle_id),
                     "charge_end_time": event.charge_end_time_by_vehicle.get(vehicle_id),
                     "assigned_weight": float(assigned_weight),
+                    "display_points": [],
                 }
             )
         event_payload.append(
@@ -226,8 +244,55 @@ def _run_single_simulation(payload: dict) -> dict:
     }
 
 
+def _build_dashboard_scenario(
+    scale: str,
+    scenario_seed: int,
+    allow_collaboration: bool,
+    weather_mode: str,
+    map_mode: bool,
+    city_name: str,
+) -> ScenarioData:
+    if map_mode:
+        return build_amap_scenario(
+            scale_name=scale,
+            seed=scenario_seed,
+            allow_collaboration=allow_collaboration,
+            weather_mode=weather_mode,
+            city_name=city_name,
+        )
+    return build_scenario(
+        scale_name=scale,
+        seed=scenario_seed,
+        allow_collaboration=allow_collaboration,
+        weather_mode=weather_mode,
+    )
+
+
+def _route_geometry(payload: dict) -> dict:
+    raw_points = payload.get("waypoints")
+    if not isinstance(raw_points, list):
+        raise ValueError("waypoints 必须是坐标数组。")
+    waypoints: List[List[float]] = []
+    for item in raw_points:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            waypoints.append([float(item[0]), float(item[1])])
+    result = fetch_route_geometry(waypoints=waypoints, strategy=str(payload.get("route_strategy", "4")))
+    return {
+        "ok": True,
+        "provider": result.get("provider", "amap"),
+        "coordinates": result.get("coordinates", []),
+        "distance_km": result.get("distance_km", 0.0),
+        "duration_min": result.get("duration_min", 0.0),
+        "strategy": result.get("strategy", "4"),
+    }
+
+
+def _route_key(route_nodes: Iterable[int]) -> str:
+    return "-".join(str(int(node_id)) for node_id in route_nodes)
+
+
 def _compare_strategies(payload: dict) -> dict:
-    scale, seed, allow_collaboration, weather_mode = _extract_common_args(payload)
+    scale, seed, allow_collaboration, weather_mode, _, _ = _extract_common_args(payload)
     base_seed = _scenario_seed_for_scale(seed, scale)
     runs = payload.get("compare_runs", 3)
     try:
@@ -303,7 +368,7 @@ def _compare_strategies(payload: dict) -> dict:
     return {"ranking": ranking, "compare_runs": runs}
 
 
-def _extract_common_args(payload: dict) -> Tuple[str, int, bool, str]:
+def _extract_common_args(payload: dict) -> Tuple[str, int, bool, str, bool, str]:
     scale = str(payload.get("scale", "small"))
     if scale not in SCENARIO_SCALES:
         scale = "small"
@@ -317,11 +382,13 @@ def _extract_common_args(payload: dict) -> Tuple[str, int, bool, str]:
     weather_mode = str(payload.get("weather_mode", "normal"))
     if weather_mode not in WEATHER_MODES:
         weather_mode = "normal"
-    return scale, seed, allow_collaboration, weather_mode
+    map_mode = bool(payload.get("map_mode", False))
+    city_name = str(payload.get("city_name", DEFAULT_CITY_NAME) or DEFAULT_CITY_NAME).strip() or DEFAULT_CITY_NAME
+    return scale, seed, allow_collaboration, weather_mode, map_mode, city_name
 
 
 def _weather_stats(payload: dict) -> dict:
-    _, seed, allow_collaboration, _ = _extract_common_args(payload)
+    _, seed, allow_collaboration, _, _, _ = _extract_common_args(payload)
     include_static_cplex = bool(payload.get("include_static_cplex", True))
     exact_time_limit = max(10, _safe_int(payload.get("exact_time_limit", 120), 120))
     exact_mip_gap = max(0.0, _safe_float(payload.get("exact_mip_gap", 0.0), 0.0))
@@ -845,16 +912,21 @@ def _is_cplex_license_limit_error(text: str) -> bool:
 
 def _serialize_scenario(scenario) -> dict:
     edges = _unique_edges(scenario.graph._adj.items())  # pylint: disable=protected-access
+    node_meta = scenario.node_meta or {}
+    depot_meta = node_meta.get(int(scenario.config.depot_node), {})
+    edge_rows = [] if str(scenario.config.map_mode) == "amap" else [{"a": a, "b": b} for a, b in edges]
     return {
         "nodes": [
             {
                 "node_id": node.node_id,
                 "x": node.x,
                 "y": node.y,
+                "label": str(node_meta.get(node.node_id, {}).get("name", "")),
+                "address": str(node_meta.get(node.node_id, {}).get("address", "")),
             }
             for node in scenario.graph.nodes.values()
         ],
-        "edges": [{"a": a, "b": b} for a, b in edges],
+        "edges": edge_rows,
         "tasks": [
             {
                 "task_id": task.task_id,
@@ -862,6 +934,8 @@ def _serialize_scenario(scenario) -> dict:
                 "release_time": task.release_time,
                 "deadline": task.deadline,
                 "weight": task.weight,
+                "place_name": str(node_meta.get(task.node_id, {}).get("name", "")),
+                "address": str(node_meta.get(task.node_id, {}).get("address", "")),
             }
             for task in scenario.tasks
         ],
@@ -883,11 +957,18 @@ def _serialize_scenario(scenario) -> dict:
                 "node_id": station.node_id,
                 "ports": station.ports,
                 "charge_rate": station.charge_rate,
+                "name": str(node_meta.get(station.node_id, {}).get("name", "")),
+                "address": str(node_meta.get(station.node_id, {}).get("address", "")),
             }
             for station in scenario.stations.values()
         ],
         "depot_node": scenario.config.depot_node,
         "weather_mode": scenario.config.weather_mode,
+        "map_mode": scenario.config.map_mode,
+        "city_name": scenario.config.city_name,
+        "route_provider": scenario.config.route_provider,
+        "depot_name": str(depot_meta.get("name", "")),
+        "depot_address": str(depot_meta.get("address", "")),
     }
 
 

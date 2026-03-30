@@ -301,6 +301,11 @@ button.ghost {
   animation: fade-up 620ms ease-out;
 }
 
+.map-wrap.geo-active #mapSvg {
+  opacity: 0.1;
+  pointer-events: none;
+}
+
 .weather-fx {
   position: absolute;
   inset: 12px;
@@ -366,10 +371,107 @@ button.ghost {
   clip-path: inset(0 round 16px);
 }
 
+.geo-map-panel {
+  position: absolute;
+  inset: 12px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 16px;
+  border: 1px solid rgba(23, 74, 120, 0.18);
+  background: rgba(242, 248, 253, 0.74);
+  backdrop-filter: blur(4px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78);
+}
+
+.geo-map-panel[hidden] {
+  display: none !important;
+}
+
+.geo-map-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 0;
+}
+
+.geo-map-badge {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.geo-map-badge strong {
+  font-size: 14px;
+  color: #123d60;
+}
+
+.geo-map-badge span {
+  font-size: 12px;
+  color: #5a7186;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.geo-map-viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid rgba(34, 81, 124, 0.16);
+  background:
+    radial-gradient(circle at 20% 15%, rgba(255, 255, 255, 0.52), transparent 32%),
+    linear-gradient(180deg, #dce9f3 0%, #eaf2f8 100%);
+}
+
+.geo-map-tiles {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.geo-map-tile {
+  position: absolute;
+  width: 256px;
+  height: 256px;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.geo-map-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.geo-map-loading {
+  position: absolute;
+  left: 50%;
+  top: 18px;
+  transform: translateX(-50%);
+  z-index: 2;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(32, 93, 144, 0.2);
+  background: rgba(255, 255, 255, 0.92);
+  color: #184768;
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: 0 8px 20px rgba(18, 54, 87, 0.14);
+}
+
 .legend {
   position: absolute;
   left: 24px;
   bottom: 24px;
+  z-index: 5;
   display: flex;
   gap: 9px;
   flex-wrap: wrap;
@@ -952,6 +1054,10 @@ button.ghost {
     height: 420px;
   }
 
+  .geo-map-panel {
+    inset: 12px;
+  }
+
   .legend {
     left: 14px;
     right: 14px;
@@ -1046,6 +1152,14 @@ button.ghost {
 
 .map-wrap:fullscreen #mapSvg {
   flex: 1;
+  min-height: 72vh;
+}
+
+.map-wrap:fullscreen .geo-map-panel {
+  inset: 18px;
+}
+
+.map-wrap:fullscreen .geo-map-viewport {
   min-height: 72vh;
 }
 

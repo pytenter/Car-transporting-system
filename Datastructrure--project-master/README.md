@@ -73,6 +73,24 @@ Default URL:
 
 - `http://127.0.0.1:8765`
 
+### Map mode with real AMap places and routes
+
+Set the AMap Web Service key before launching the dashboard:
+
+```bash
+# Windows PowerShell
+$env:AMAP_KEY="3eea863de78d004ad2429915ece8e471"
+python dashboard.py
+```
+
+Then in the dashboard:
+
+- Click `地图模式：关/开` to switch to real map mode
+- Enter a city name such as `上海`
+- Run a simulation to generate task locations from real AMap POIs
+- Charging stations are sampled from real charging-station POIs in the same city
+- Vehicle replay routes are fetched from AMap driving directions
+
 ### Weather and incident simulation in dashboard
 
 - In the top control bar, use **Weather** selector:

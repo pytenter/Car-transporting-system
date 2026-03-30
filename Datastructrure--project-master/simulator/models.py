@@ -137,6 +137,9 @@ class SimulationConfig:
     depot_charge_ports: int = 4
     rush_windows: List[tuple[int, int, float]] = field(default_factory=list)
     weather_mode: str = "normal"
+    map_mode: str = "synthetic"
+    city_name: str = ""
+    route_provider: str = "graph"
 
 
 @dataclass
