@@ -429,6 +429,25 @@ button.ghost {
     linear-gradient(180deg, #dce9f3 0%, #eaf2f8 100%);
 }
 
+.geo-map-static-base {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  display: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.geo-map-viewport.static-image .geo-map-static-base {
+  display: block;
+}
+
+.geo-map-viewport.static-image .geo-map-tiles {
+  display: none;
+}
+
 .geo-map-tiles {
   position: absolute;
   inset: 0;

@@ -7,6 +7,17 @@ const GEO_MAP_PADDING = 56;
 const GEO_TILE_URL_TEMPLATE = "https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}";
 const GEO_TILE_SUBDOMAINS = ["1", "2", "3", "4"];
 const GEO_ROUTE_FETCH_CONCURRENCY = 4;
+const OFFLINE_CITY_NAME = "广州市";
+const OFFLINE_DISTRICT_NAME = "番禺区";
+const OFFLINE_SCOPE_LABEL = `${OFFLINE_CITY_NAME}${OFFLINE_DISTRICT_NAME}`;
+const OFFLINE_BASEMAP_URL = "/assets/panyu-basemap.png";
+const OFFLINE_ROUTE_PROVIDER = "offline_panyu";
+const OFFLINE_BASEMAP_BOUNDS = {
+  west: 113.15,
+  east: 113.70,
+  south: 22.86,
+  north: 23.24
+};
 const REPLAY_SIM_TIME_TO_MS = 78;
 /** 连续播放时降低侧栏刷新频率，减轻 DOM 压力，演示更流畅 */
 const REPLAY_SIDE_PANEL_THROTTLE_MS = 120;
@@ -156,6 +167,7 @@ const dom = {
   geoMapMeta: document.getElementById("geoMapMeta"),
   geoMapCloseBtn: document.getElementById("geoMapCloseBtn"),
   geoMapViewport: document.getElementById("geoMapViewport"),
+  geoMapStaticBase: document.getElementById("geoMapStaticBase"),
   geoMapTiles: document.getElementById("geoMapTiles"),
   geoMapOverlay: document.getElementById("geoMapOverlay"),
   geoMapLoading: document.getElementById("geoMapLoading"),
@@ -289,10 +301,14 @@ async function initialize() {
   );
   dom.seedInput.value = String(meta.defaults.seed);
   if (dom.cityInput) {
-    dom.cityInput.value = String(meta.defaults.city_name || "Shanghai");
+    dom.cityInput.value = OFFLINE_CITY_NAME;
+    dom.cityInput.readOnly = true;
+    dom.cityInput.title = "当前界面已固定为广州市番禺区";
   }
   if (dom.districtInput) {
-    dom.districtInput.value = String(meta.defaults.district_name || "");
+    dom.districtInput.value = OFFLINE_DISTRICT_NAME;
+    dom.districtInput.readOnly = true;
+    dom.districtInput.title = "当前界面已固定为广州市番禺区";
   }
   dom.collabInput.checked = Boolean(meta.defaults.allow_collaboration);
   if (dom.mapModeBtn) {
@@ -593,13 +609,14 @@ function readMapPayload() {
   return {
     ...readCommonPayload(),
     map_mode: true,
-    city_name: String(dom.cityInput?.value || state.meta?.defaults?.city_name || "Shanghai").trim() || "Shanghai",
-    district_name: String(dom.districtInput?.value || state.meta?.defaults?.district_name || "").trim()
+    city_name: OFFLINE_CITY_NAME,
+    district_name: OFFLINE_DISTRICT_NAME
   };
 }
 
 function isGeoScenario() {
-  return Boolean(state.scenario && String(state.scenario.map_mode || "") === "amap");
+  const mode = String(state.scenario?.map_mode || "");
+  return Boolean(state.scenario && (mode === "amap" || mode === "local_mask"));
 }
 
 function isGeoReplayAvailable() {
@@ -1074,9 +1091,14 @@ async function loadGeoRoute(routeKey, routeNodes) {
       const coordinates = normalizeGeoCoordinatePairs(data.coordinates);
       const result = {
         coordinates: coordinates.length >= 2 ? coordinates : fallbackCoordinates,
-        fallback: coordinates.length < 2
+        fallback: coordinates.length < 2,
+        distance_km: Number(data.distance_km || 0),
+        duration_min: Number(data.duration_min || 0)
       };
       state.geoRouteCache.set(routeKey, result);
+      if (!result.fallback && isOfflinePanyuScenario()) {
+        void cacheGeoRouteOffline(routeNodes, result);
+      }
       if (result.fallback) {
         state.geoRouteFailures.add(routeKey);
       } else {
@@ -1105,6 +1127,26 @@ async function loadGeoRoute(routeKey, routeNodes) {
 
   state.geoRoutePending.set(routeKey, task);
   return task;
+}
+
+async function cacheGeoRouteOffline(routeNodes, routeData) {
+  if (!Array.isArray(routeNodes) || routeNodes.length < 2) {
+    return;
+  }
+  if (!routeData || !Array.isArray(routeData.coordinates) || routeData.coordinates.length < 2) {
+    return;
+  }
+  try {
+    await postJson("/api/cache-route", {
+      scale: String(state.scenario?.name || dom.scaleSelect?.value || "").trim(),
+      route_nodes: routeNodes,
+      coordinates: routeData.coordinates,
+      distance_km: Number(routeData.distance_km || 0),
+      duration_min: Number(routeData.duration_min || 0)
+    });
+  } catch (_err) {
+    // Ignore persistence failures and keep replay running with the in-memory route.
+  }
 }
 
 async function runConcurrent(items, limit, worker) {
@@ -1172,7 +1214,8 @@ function updateGeoMapMeta() {
   const city = state.scenario.city_name || "高德城市";
   const district = String(state.scenario.district_name || "").trim();
   const scope = district ? `${city}${district}` : city;
-  dom.geoMapMeta.textContent = `${scope} | ${zhScale(state.scenario.map_mode === "amap" ? state.summary?.scenario || dom.scaleSelect.value : dom.scaleSelect.value)} | ${zhWeather(state.scenario.weather_mode || dom.weatherSelect.value)}`;
+  const prefix = isOfflinePanyuScenario() ? "固定底图" : "地图回放";
+  dom.geoMapMeta.textContent = `${prefix}：${scope} | ${zhScale(state.scenario.map_mode === "amap" ? state.summary?.scenario || dom.scaleSelect.value : dom.scaleSelect.value)} | ${zhWeather(state.scenario.weather_mode || dom.weatherSelect.value)}`;
 }
 
 function prepareReplayTimeline() {
@@ -2509,16 +2552,45 @@ function buildGeoView(nodes) {
   return { ...best, offsetX, offsetY };
 }
 
+function isOfflinePanyuScenario() {
+  if (!state.scenario) {
+    return false;
+  }
+  return String(state.scenario.city_name || "").trim() === OFFLINE_CITY_NAME
+    && String(state.scenario.district_name || "").trim() === OFFLINE_DISTRICT_NAME;
+}
+
+function buildOfflineStaticView() {
+  const viewport = geoViewportSize();
+  const zoom = 12;
+  const topLeft = lngLatToWorld(OFFLINE_BASEMAP_BOUNDS.west, OFFLINE_BASEMAP_BOUNDS.north, zoom);
+  const bottomRight = lngLatToWorld(OFFLINE_BASEMAP_BOUNDS.east, OFFLINE_BASEMAP_BOUNDS.south, zoom);
+  return {
+    kind: "static-image",
+    zoom,
+    width: viewport.width,
+    height: viewport.height,
+    minX: topLeft.x,
+    maxX: bottomRight.x,
+    minY: topLeft.y,
+    maxY: bottomRight.y,
+    spanX: Math.max(1, bottomRight.x - topLeft.x),
+    spanY: Math.max(1, bottomRight.y - topLeft.y),
+    offsetX: 0,
+    offsetY: 0
+  };
+}
+
 function ensureGeoView() {
   if (!state.scenario?.nodes?.length) {
     return null;
   }
   const viewport = geoViewportSize();
-  const signature = `${state.scenario.nodes.length}:${viewport.width}x${viewport.height}`;
+  const signature = `${state.scenario.nodes.length}:${viewport.width}x${viewport.height}:${isOfflinePanyuScenario() ? "offline" : "tiles"}`;
   if (state.geoView && state.geoViewSignature === signature) {
     return state.geoView;
   }
-  const view = buildGeoView(state.scenario.nodes);
+  const view = isOfflinePanyuScenario() ? buildOfflineStaticView() : buildGeoView(state.scenario.nodes);
   state.geoView = view;
   state.geoViewSignature = signature;
   state.geoTilesSignature = "";
@@ -2529,6 +2601,13 @@ function projectGeoPoint(xValue, yValue) {
   const view = state.geoView || ensureGeoView();
   if (!view) {
     return null;
+  }
+  if (view.kind === "static-image") {
+    const world = lngLatToWorld(xValue, yValue, view.zoom);
+    return {
+      x: ((world.x - view.minX) / Math.max(1e-6, view.spanX)) * view.width,
+      y: ((world.y - view.minY) / Math.max(1e-6, view.spanY)) * view.height
+    };
   }
   const world = lngLatToWorld(xValue, yValue, view.zoom);
   return {
@@ -2548,6 +2627,16 @@ function geoTileUrl(x, y, zoom) {
 
 function renderGeoTiles(view) {
   if (!dom.geoMapTiles || !view) {
+    return;
+  }
+  if (dom.geoMapViewport) {
+    dom.geoMapViewport.classList.toggle("static-image", view.kind === "static-image");
+  }
+  if (dom.geoMapStaticBase) {
+    dom.geoMapStaticBase.src = OFFLINE_BASEMAP_URL;
+  }
+  if (view.kind === "static-image") {
+    dom.geoMapTiles.innerHTML = "";
     return;
   }
   const left = -view.offsetX;
@@ -2583,6 +2672,9 @@ function renderGeoTiles(view) {
 
 function queueGeoRouteRequests(activeRoutes) {
   if (!isGeoReplayAvailable()) {
+    return;
+  }
+  if (String(state.scenario?.route_provider || "") !== "amap") {
     return;
   }
   const visible = new Map();

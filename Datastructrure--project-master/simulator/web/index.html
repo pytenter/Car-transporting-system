@@ -42,11 +42,11 @@
       </label>
       <label>
         城市
-        <input id="cityInput" type="text" value="Shanghai">
+        <input id="cityInput" type="text" value="广州市">
       </label>
       <label>
         行政区
-        <input id="districtInput" type="text" value="">
+        <input id="districtInput" type="text" value="番禺区">
       </label>
       <label class="checkbox">
         <input id="collabInput" type="checkbox" checked>
@@ -117,6 +117,7 @@
               <button id="geoMapCloseBtn" class="ghost" type="button">关闭地图</button>
             </div>
             <div id="geoMapViewport" class="geo-map-viewport">
+              <img id="geoMapStaticBase" class="geo-map-static-base" src="/assets/panyu-basemap.png" alt="广州市番禺区固定底图">
               <div id="geoMapTiles" class="geo-map-tiles" aria-hidden="true"></div>
               <svg id="geoMapOverlay" class="geo-map-overlay" aria-label="高德地图回放图层">
                 <g id="geoHistoryLayer"></g>

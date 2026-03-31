@@ -5,6 +5,7 @@ import math
 import os
 import random
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -37,6 +38,10 @@ TASK_KEYWORDS = (
 STATION_KEYWORDS = ("充电站", "汽车充电站", "新能源充电站", "充电桩")
 
 ROAD_DISTANCE_FACTOR = 1.18
+OFFLINE_CACHE_DIR = Path(__file__).with_name("offline_cache")
+OFFLINE_SCOPE_CITY = "广州市"
+OFFLINE_SCOPE_DISTRICT = "番禺区"
+OFFLINE_CACHE_SCHEMA_VERSION = 1
 
 _ROUTE_CACHE: Dict[tuple[tuple[float, float], ...], dict] = {}
 
@@ -63,6 +68,207 @@ def has_amap_key() -> bool:
     return bool(_get_amap_key())
 
 
+def is_fixed_offline_scope(city_name: str, district_name: str) -> bool:
+    return (
+        str(city_name or "").strip() == OFFLINE_SCOPE_CITY
+        and str(district_name or "").strip() == OFFLINE_SCOPE_DISTRICT
+    )
+
+
+def has_offline_cached_panyu_data() -> bool:
+    return any(_offline_scenario_path(scale_name).exists() for scale_name in SCENARIO_SCALES.keys())
+
+
+def load_offline_route_cache(scale_name: str) -> Dict[str, dict]:
+    path = _offline_routes_path(scale_name)
+    payload = _read_offline_payload(path)
+    if payload is None:
+        return {}
+    routes = payload.get("routes")
+    if not isinstance(routes, dict):
+        return {}
+
+    normalized: Dict[str, dict] = {}
+    for route_key, item in routes.items():
+        if not isinstance(route_key, str) or not isinstance(item, dict):
+            continue
+        coordinates = _normalize_coordinate_list(item.get("coordinates"))
+        if len(coordinates) < 2:
+            continue
+        normalized[route_key] = {
+            "coordinates": coordinates,
+            "distance_km": _safe_float(item.get("distance_km")),
+            "duration_min": _safe_float(item.get("duration_min")),
+        }
+    return normalized
+
+
+def cache_offline_route_geometry(
+    scale_name: str,
+    route_nodes: Sequence[int],
+    coordinates: Sequence[Sequence[float]],
+    *,
+    distance_km: float = 0.0,
+    duration_min: float = 0.0,
+) -> bool:
+    route_key = _offline_route_key(route_nodes)
+    normalized = _normalize_coordinate_list(coordinates)
+    if len(normalized) < 2 or not route_key:
+        return False
+
+    path = _offline_routes_path(scale_name)
+    payload = _read_offline_payload(path) or _build_offline_route_payload(scale_name)
+    routes = payload.setdefault("routes", {})
+    if not isinstance(routes, dict):
+        routes = {}
+        payload["routes"] = routes
+    routes[route_key] = {
+        "coordinates": normalized,
+        "distance_km": float(distance_km or 0.0),
+        "duration_min": float(duration_min or 0.0),
+    }
+    _write_offline_payload(path, payload)
+    return True
+
+
+def load_offline_scenario(
+    scale_name: str,
+    seed: int,
+    allow_collaboration: bool = False,
+    weather_mode: str = "normal",
+) -> ScenarioData | None:
+    path = _offline_scenario_path(scale_name)
+    payload = _read_offline_payload(path)
+    if payload is None:
+        return None
+
+    nodes_payload = payload.get("nodes")
+    tasks_payload = payload.get("tasks")
+    vehicles_payload = payload.get("vehicles")
+    stations_payload = payload.get("stations")
+    config_payload = payload.get("config")
+    if not all(isinstance(item, list) for item in (nodes_payload, tasks_payload, vehicles_payload, stations_payload)):
+        return None
+    if not isinstance(config_payload, dict):
+        return None
+
+    scale = SCENARIO_SCALES.get(scale_name)
+    if scale is None:
+        return None
+
+    graph = WeightedGraph()
+    for row in nodes_payload:
+        if not isinstance(row, dict):
+            continue
+        graph.add_node(
+            node_id=int(row.get("node_id", 0)),
+            x=float(row.get("x", 0.0)),
+            y=float(row.get("y", 0.0)),
+        )
+
+    edges_payload = payload.get("edges")
+    if isinstance(edges_payload, list):
+        for row in edges_payload:
+            if not isinstance(row, dict):
+                continue
+            graph.add_edge(
+                int(row.get("a", 0)),
+                int(row.get("b", 0)),
+                float(row.get("distance", 0.0)),
+            )
+    else:
+        node_ids = sorted(graph.nodes.keys())
+        for idx, src in enumerate(node_ids):
+            for dst in node_ids[idx + 1 :]:
+                a = graph.nodes[src]
+                b = graph.nodes[dst]
+                distance = max(0.15, _haversine_km(a.x, a.y, b.x, b.y) * ROAD_DISTANCE_FACTOR)
+                graph.add_edge(src, dst, distance)
+
+    tasks: List[Task] = []
+    for row in tasks_payload:
+        if not isinstance(row, dict):
+            continue
+        tasks.append(
+            Task(
+                task_id=int(row.get("task_id", 0)),
+                release_time=int(row.get("release_time", 0)),
+                node_id=int(row.get("node_id", 0)),
+                x=float(row.get("x", 0.0)),
+                y=float(row.get("y", 0.0)),
+                weight=float(row.get("weight", 0.0)),
+                deadline=int(row.get("deadline", 0)),
+            )
+        )
+
+    vehicles: Dict[int, Vehicle] = {}
+    for row in vehicles_payload:
+        if not isinstance(row, dict):
+            continue
+        vehicle_id = int(row.get("vehicle_id", 0))
+        vehicles[vehicle_id] = Vehicle(
+            vehicle_id=vehicle_id,
+            capacity=float(row.get("capacity", 0.0)),
+            battery_capacity=float(row.get("battery_capacity", 0.0)),
+            speed=float(row.get("speed", 0.0)),
+            energy_per_distance=float(row.get("energy_per_distance", 0.0)),
+            current_node=int(row.get("current_node", 0)),
+            battery=float(row.get("battery", 0.0)),
+            available_time=float(row.get("available_time", 0.0)),
+        )
+
+    stations: Dict[int, ChargingStation] = {}
+    for row in stations_payload:
+        if not isinstance(row, dict):
+            continue
+        station_id = int(row.get("station_id", 0))
+        stations[station_id] = ChargingStation(
+            station_id=station_id,
+            node_id=int(row.get("node_id", 0)),
+            charge_rate=float(row.get("charge_rate", 0.0)),
+            ports=int(row.get("ports", 1)),
+        )
+
+    node_meta_payload = payload.get("node_meta") or {}
+    node_meta = {
+        int(node_id): dict(meta)
+        for node_id, meta in node_meta_payload.items()
+        if isinstance(meta, dict)
+    }
+    cached_allow_collaboration = bool(config_payload.get("allow_collaboration", allow_collaboration))
+    effective_allow_collaboration = bool(allow_collaboration or cached_allow_collaboration)
+    rnd = random.Random(seed)
+    config = SimulationConfig(
+        name=str(config_payload.get("name", scale_name)),
+        seed=seed,
+        horizon=int(config_payload.get("horizon", scale.horizon)),
+        depot_node=int(config_payload.get("depot_node", 0)),
+        service_time=float(config_payload.get("service_time", 3.8)),
+        overtime_penalty=float(config_payload.get("overtime_penalty", 70.0)),
+        unserved_penalty=float(config_payload.get("unserved_penalty", 60.0)),
+        allow_collaboration=effective_allow_collaboration,
+        min_battery_reserve_ratio=float(config_payload.get("min_battery_reserve_ratio", 0.30)),
+        task_end_target_ratio=float(config_payload.get("task_end_target_ratio", 0.55)),
+        idle_recharge_trigger_ratio=float(config_payload.get("idle_recharge_trigger_ratio", 0.55)),
+        idle_recharge_target_ratio=float(config_payload.get("idle_recharge_target_ratio", 0.90)),
+        allow_depot_charging=bool(config_payload.get("allow_depot_charging", True)),
+        depot_charge_rate=float(config_payload.get("depot_charge_rate", 7.2)),
+        depot_charge_ports=int(config_payload.get("depot_charge_ports", 4)),
+        rush_windows=_build_weather_rush_windows(scale=scale, rnd=rnd, weather_mode=weather_mode),
+        weather_mode=weather_mode,
+        map_mode="amap",
+        city_name=OFFLINE_SCOPE_CITY,
+        district_name=OFFLINE_SCOPE_DISTRICT,
+        route_provider="offline_panyu",
+    )
+
+    tasks.sort(key=lambda item: (item.release_time, item.task_id))
+    scenario = ScenarioData(graph=graph, tasks=tasks, vehicles=vehicles, stations=stations, config=config, node_meta=node_meta)
+    if is_fixed_offline_scope(scope.city_name, scope.district_name):
+        save_offline_scenario(scale_name, scenario)
+    return scenario
+
+
 def build_amap_scenario(
     scale_name: str,
     seed: int,
@@ -71,6 +277,15 @@ def build_amap_scenario(
     city_name: str = DEFAULT_CITY_NAME,
     district_name: str = DEFAULT_DISTRICT_NAME,
 ) -> ScenarioData:
+    if is_fixed_offline_scope(city_name, district_name):
+        cached = load_offline_scenario(
+            scale_name=scale_name,
+            seed=seed,
+            allow_collaboration=allow_collaboration,
+            weather_mode=weather_mode,
+        )
+        if cached is not None:
+            return cached
     if not has_amap_key():
         raise RuntimeError("地图模式需要配置高德 Web 服务 Key。请设置环境变量 AMAP_KEY。")
     if scale_name not in SCENARIO_SCALES:
@@ -524,6 +739,148 @@ def _safe_float(value: object) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def save_offline_scenario(scale_name: str, scenario: ScenarioData) -> None:
+    payload = {
+        "schema_version": OFFLINE_CACHE_SCHEMA_VERSION,
+        "scope": {
+            "city_name": OFFLINE_SCOPE_CITY,
+            "district_name": OFFLINE_SCOPE_DISTRICT,
+        },
+        "scale_name": scale_name,
+        "config": {
+            "name": scenario.config.name,
+            "horizon": scenario.config.horizon,
+            "depot_node": scenario.config.depot_node,
+            "service_time": scenario.config.service_time,
+            "overtime_penalty": scenario.config.overtime_penalty,
+            "unserved_penalty": scenario.config.unserved_penalty,
+            "allow_collaboration": scenario.config.allow_collaboration,
+            "min_battery_reserve_ratio": scenario.config.min_battery_reserve_ratio,
+            "task_end_target_ratio": scenario.config.task_end_target_ratio,
+            "idle_recharge_trigger_ratio": scenario.config.idle_recharge_trigger_ratio,
+            "idle_recharge_target_ratio": scenario.config.idle_recharge_target_ratio,
+            "allow_depot_charging": scenario.config.allow_depot_charging,
+            "depot_charge_rate": scenario.config.depot_charge_rate,
+            "depot_charge_ports": scenario.config.depot_charge_ports,
+        },
+        "nodes": [
+            {
+                "node_id": node.node_id,
+                "x": node.x,
+                "y": node.y,
+            }
+            for node in sorted(scenario.graph.nodes.values(), key=lambda item: item.node_id)
+        ],
+        "edges": [
+            {
+                "a": src,
+                "b": dst,
+                "distance": distance,
+            }
+            for src, neighbors in scenario.graph._adj.items()  # pylint: disable=protected-access
+            for dst, distance in neighbors
+            if src < dst
+        ],
+        "tasks": [
+            {
+                "task_id": task.task_id,
+                "release_time": task.release_time,
+                "node_id": task.node_id,
+                "x": task.x,
+                "y": task.y,
+                "weight": task.weight,
+                "deadline": task.deadline,
+            }
+            for task in scenario.tasks
+        ],
+        "vehicles": [
+            {
+                "vehicle_id": vehicle.vehicle_id,
+                "capacity": vehicle.capacity,
+                "battery_capacity": vehicle.battery_capacity,
+                "speed": vehicle.speed,
+                "energy_per_distance": vehicle.energy_per_distance,
+                "current_node": vehicle.current_node,
+                "battery": vehicle.battery,
+                "available_time": vehicle.available_time,
+            }
+            for vehicle in sorted(scenario.vehicles.values(), key=lambda item: item.vehicle_id)
+        ],
+        "stations": [
+            {
+                "station_id": station.station_id,
+                "node_id": station.node_id,
+                "charge_rate": station.charge_rate,
+                "ports": station.ports,
+            }
+            for station in sorted(scenario.stations.values(), key=lambda item: item.station_id)
+        ],
+        "node_meta": {
+            str(node_id): dict(meta)
+            for node_id, meta in (scenario.node_meta or {}).items()
+            if isinstance(meta, dict)
+        },
+    }
+    _write_offline_payload(_offline_scenario_path(scale_name), payload)
+
+
+def _offline_scenario_path(scale_name: str) -> Path:
+    return OFFLINE_CACHE_DIR / f"scenario_{scale_name}.json"
+
+
+def _offline_routes_path(scale_name: str) -> Path:
+    return OFFLINE_CACHE_DIR / f"routes_{scale_name}.json"
+
+
+def _offline_route_key(route_nodes: Sequence[int]) -> str:
+    return "-".join(str(int(node_id)) for node_id in route_nodes)
+
+
+def _build_offline_route_payload(scale_name: str) -> dict:
+    return {
+        "schema_version": OFFLINE_CACHE_SCHEMA_VERSION,
+        "scope": {
+            "city_name": OFFLINE_SCOPE_CITY,
+            "district_name": OFFLINE_SCOPE_DISTRICT,
+        },
+        "scale_name": scale_name,
+        "routes": {},
+    }
+
+
+def _normalize_coordinate_list(coordinates: object) -> List[List[float]]:
+    normalized: List[List[float]] = []
+    if not isinstance(coordinates, (list, tuple)):
+        return normalized
+    for item in coordinates:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        point = [round(float(item[0]), 6), round(float(item[1]), 6)]
+        if normalized and normalized[-1] == point:
+            continue
+        normalized.append(point)
+    return normalized
+
+
+def _read_offline_payload(path: Path) -> dict | None:
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if int(payload.get("schema_version", 0) or 0) != OFFLINE_CACHE_SCHEMA_VERSION:
+        return None
+    return payload
+
+
+def _write_offline_payload(path: Path, payload: dict) -> None:
+    OFFLINE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _get_amap_key() -> str:

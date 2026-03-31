@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import mimetypes
 import webbrowser
 from dataclasses import asdict
 from datetime import datetime
@@ -11,8 +12,18 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Tuple, TypeVar
 from urllib.parse import urlparse
 
-from .amap_integration import DEFAULT_CITY_NAME, DEFAULT_DISTRICT_NAME, build_amap_scenario, fetch_route_geometry, has_amap_key
+from .amap_integration import (
+    DEFAULT_CITY_NAME,
+    DEFAULT_DISTRICT_NAME,
+    build_amap_scenario,
+    cache_offline_route_geometry,
+    fetch_route_geometry,
+    has_amap_key,
+    has_offline_cached_panyu_data,
+    load_offline_route_cache,
+)
 from .exact_solver import HAS_CPLEX, solve_with_cplex
+from .panyu_local_map import build_panyu_local_scenario, has_panyu_local_map_assets
 from .simulation import SCENARIO_SCALES, WEATHER_MODES, FleetSimulator, ScenarioData, build_scenario, run_strategies_for_scenario
 from .strategies import (
     AuctionBasedStrategy,
@@ -66,6 +77,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
 
         if path == "/api/meta":
+            has_local_map = has_panyu_local_map_assets()
+            map_mode_available = has_local_map or has_amap_key() or has_offline_cached_panyu_data()
             self._write_json(
                 {
                     "scales": list(SCENARIO_SCALES.keys()),
@@ -77,12 +90,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                         "allow_collaboration": True,
                         "weather_mode": "normal",
                         "map_mode": False,
-                        "city_name": DEFAULT_CITY_NAME,
-                        "district_name": DEFAULT_DISTRICT_NAME,
+                        "city_name": "广州市",
+                        "district_name": "番禺区",
                     },
                     "weather_modes": list(WEATHER_MODES),
-                    "map_mode_available": has_amap_key(),
-                    "route_provider": "amap" if has_amap_key() else "graph",
+                    "map_mode_available": map_mode_available,
+                    "route_provider": "local_mask" if has_local_map else ("offline_panyu" if has_offline_cached_panyu_data() else ("amap" if has_amap_key() else "graph")),
                     "route_strategy_hint": "地图模式会使用高德地点与高德驾车路线；需要先配置环境变量 AMAP_KEY。",
                 }
             )
@@ -102,6 +115,10 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/app.js":
             self._write_file("app.js", "application/javascript; charset=utf-8")
+            return
+        if path.startswith("/assets/"):
+            asset_rel = path.removeprefix("/assets/")
+            self._write_asset(asset_rel)
             return
 
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
@@ -128,6 +145,11 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/route-geometry":
                 payload = self._read_json_body()
                 response = _route_geometry(payload)
+                self._write_json(response)
+                return
+            if parsed.path == "/api/cache-route":
+                payload = self._read_json_body()
+                response = _cache_route_geometry(payload)
                 self._write_json(response)
                 return
         except Exception as exc:
@@ -171,6 +193,26 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _write_asset(self, relative_path: str) -> None:
+        assets_root = (WEB_DIR / "assets").resolve()
+        asset_path = (assets_root / relative_path).resolve()
+        try:
+            asset_path.relative_to(assets_root)
+        except ValueError:
+            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+            return
+        if not asset_path.exists() or not asset_path.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+            return
+
+        data = asset_path.read_bytes()
+        content_type = mimetypes.guess_type(str(asset_path))[0] or "application/octet-stream"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
 
 def _run_single_simulation(payload: dict) -> dict:
     scale, seed, allow_collaboration, weather_mode, map_mode, city_name, district_name = _extract_common_args(payload)
@@ -190,6 +232,7 @@ def _run_single_simulation(payload: dict) -> dict:
     scenario_snapshot = copy.deepcopy(scenario)
     simulator = FleetSimulator(copy.deepcopy(scenario))
     summary, _, events = simulator.run(strategy)
+    route_cache = load_offline_route_cache(scale) if map_mode else {}
 
     task_states = {task.task_id: "pending" for task in scenario.tasks}
     task_by_id = {task.task_id: task for task in scenario.tasks}
@@ -219,7 +262,7 @@ def _run_single_simulation(payload: dict) -> dict:
                     "charge_start_time": event.charge_start_time_by_vehicle.get(vehicle_id),
                     "charge_end_time": event.charge_end_time_by_vehicle.get(vehicle_id),
                     "assigned_weight": float(assigned_weight),
-                    "display_points": [],
+                    "display_points": _cached_route_display_points(route_cache, route_nodes),
                 }
             )
         event_payload.append(
@@ -256,6 +299,17 @@ def _build_dashboard_scenario(
     district_name: str,
 ) -> ScenarioData:
     if map_mode:
+        if (
+            has_panyu_local_map_assets()
+            and str(city_name or "").strip() == "广州市"
+            and str(district_name or "").strip() == "番禺区"
+        ):
+            return build_panyu_local_scenario(
+                scale_name=scale,
+                seed=scenario_seed,
+                allow_collaboration=allow_collaboration,
+                weather_mode=weather_mode,
+            )
         return build_amap_scenario(
             scale_name=scale,
             seed=scenario_seed,
@@ -291,8 +345,53 @@ def _route_geometry(payload: dict) -> dict:
     }
 
 
+def _cache_route_geometry(payload: dict) -> dict:
+    scale = str(payload.get("scale", "") or "").strip()
+    raw_route_nodes = payload.get("route_nodes")
+    raw_coordinates = payload.get("coordinates")
+    if scale not in SCENARIO_SCALES:
+        raise ValueError("invalid scale")
+    if not isinstance(raw_route_nodes, list) or not isinstance(raw_coordinates, list):
+        raise ValueError("route_nodes and coordinates are required")
+
+    route_nodes = [int(node_id) for node_id in raw_route_nodes]
+    coordinates = []
+    for item in raw_coordinates:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            coordinates.append([float(item[0]), float(item[1])])
+    if len(route_nodes) < 2 or len(coordinates) < 2:
+        raise ValueError("route cache payload is incomplete")
+
+    saved = cache_offline_route_geometry(
+        scale_name=scale,
+        route_nodes=route_nodes,
+        coordinates=coordinates,
+        distance_km=float(payload.get("distance_km", 0.0) or 0.0),
+        duration_min=float(payload.get("duration_min", 0.0) or 0.0),
+    )
+    return {"ok": bool(saved)}
+
+
 def _route_key(route_nodes: Iterable[int]) -> str:
     return "-".join(str(int(node_id)) for node_id in route_nodes)
+
+
+def _cached_route_display_points(route_cache: Dict[str, dict], route_nodes: Iterable[int]) -> List[List[float]]:
+    cached = route_cache.get(_route_key(route_nodes))
+    if not isinstance(cached, dict):
+        return []
+    coordinates = cached.get("coordinates")
+    if not isinstance(coordinates, list):
+        return []
+    points: List[List[float]] = []
+    for item in coordinates:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        point = [float(item[0]), float(item[1])]
+        if points and points[-1] == point:
+            continue
+        points.append(point)
+    return points
 
 
 def _compare_strategies(payload: dict) -> dict:
@@ -919,8 +1018,9 @@ def _serialize_scenario(scenario) -> dict:
     edges = _unique_edges(scenario.graph._adj.items())  # pylint: disable=protected-access
     node_meta = scenario.node_meta or {}
     depot_meta = node_meta.get(int(scenario.config.depot_node), {})
-    edge_rows = [] if str(scenario.config.map_mode) == "amap" else [{"a": a, "b": b} for a, b in edges]
+    edge_rows = [] if str(scenario.config.map_mode) in {"amap", "local_mask"} else [{"a": a, "b": b} for a, b in edges]
     return {
+        "name": scenario.config.name,
         "nodes": [
             {
                 "node_id": node.node_id,
