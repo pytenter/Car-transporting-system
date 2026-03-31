@@ -24,6 +24,7 @@ from .amap_integration import (
 )
 from .exact_solver import HAS_CPLEX, solve_with_cplex
 from .panyu_local_map import build_panyu_local_scenario, has_panyu_local_map_assets
+from .models import Vehicle
 from .simulation import SCENARIO_SCALES, WEATHER_MODES, FleetSimulator, ScenarioData, build_scenario, run_strategies_for_scenario
 from .strategies import (
     AuctionBasedStrategy,
@@ -304,26 +305,61 @@ def _build_dashboard_scenario(
             and str(city_name or "").strip() == "广州市"
             and str(district_name or "").strip() == "番禺区"
         ):
-            return build_panyu_local_scenario(
+            scenario = build_panyu_local_scenario(
                 scale_name=scale,
                 seed=scenario_seed,
                 allow_collaboration=allow_collaboration,
                 weather_mode=weather_mode,
             )
-        return build_amap_scenario(
-            scale_name=scale,
-            seed=scenario_seed,
-            allow_collaboration=allow_collaboration,
-            weather_mode=weather_mode,
-            city_name=city_name,
-            district_name=district_name,
-        )
+        else:
+            scenario = build_amap_scenario(
+                scale_name=scale,
+                seed=scenario_seed,
+                allow_collaboration=allow_collaboration,
+                weather_mode=weather_mode,
+                city_name=city_name,
+                district_name=district_name,
+            )
+        _apply_dashboard_map_relief(scenario)
+        return scenario
     return build_scenario(
         scale_name=scale,
         seed=scenario_seed,
         allow_collaboration=allow_collaboration,
         weather_mode=weather_mode,
     )
+
+
+def _apply_dashboard_map_relief(scenario: ScenarioData) -> None:
+    if str(scenario.config.map_mode) == "synthetic":
+        return
+    if str(scenario.config.name) != "medium":
+        return
+
+    target_task_count = 74
+    target_vehicle_count = 18
+    extra_deadline = 70
+
+    if len(scenario.tasks) > target_task_count:
+        scenario.tasks = list(scenario.tasks[:target_task_count])
+
+    current_vehicle_count = len(scenario.vehicles)
+    if current_vehicle_count < target_vehicle_count and scenario.vehicles:
+        next_vehicle_id = max(scenario.vehicles.keys()) + 1
+        ref = scenario.vehicles[min(scenario.vehicles.keys())]
+        for offset in range(target_vehicle_count - current_vehicle_count):
+            scenario.vehicles[next_vehicle_id + offset] = Vehicle(
+                vehicle_id=next_vehicle_id + offset,
+                capacity=ref.capacity,
+                battery_capacity=ref.battery_capacity,
+                speed=ref.speed,
+                energy_per_distance=ref.energy_per_distance,
+                current_node=scenario.config.depot_node,
+                battery=ref.battery_capacity * 0.90,
+            )
+
+    for task in scenario.tasks:
+        task.deadline += extra_deadline
 
 
 def _route_geometry(payload: dict) -> dict:

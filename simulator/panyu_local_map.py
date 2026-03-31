@@ -296,15 +296,15 @@ def _target_graph_nodes(scale_name: str) -> int:
 
 def _local_scale(scale_name: str) -> ScenarioScale:
     base = SCENARIO_SCALES[scale_name]
-    if scale_name != "small":
-        return base
-    return replace(
-        base,
-        tasks=22,
-        stations=4,
-        horizon=max(base.horizon, 450),
-        max_task_weight=min(20.0, base.max_task_weight + 0.8),
-    )
+    if scale_name == "small":
+        return replace(
+            base,
+            tasks=22,
+            stations=4,
+            horizon=max(base.horizon, 450),
+            max_task_weight=min(20.0, base.max_task_weight + 0.8),
+        )
+    return base
 
 
 def _select_spread_points(
@@ -724,7 +724,6 @@ def _apply_map_scale_tuning(
             if ports_add:
                 station.ports = max(1, station.ports + ports_add)
                 station._port_available_times = [0.0 for _ in range(station.ports)]
-
 
 def _pixel_to_lnglat(px: int, py: int, width: int, height: int) -> Tuple[float, float]:
     lng = MAP_BOUNDS["west"] + (MAP_BOUNDS["east"] - MAP_BOUNDS["west"]) * (px / max(1, width - 1))

@@ -572,7 +572,6 @@ def _apply_map_scale_tuning(
                 station.ports = max(1, station.ports + ports_add)
                 station._port_available_times = [0.0 for _ in range(station.ports)]
 
-
 def fetch_route_geometry(waypoints: Sequence[Sequence[float]], strategy: str = "4") -> dict:
     if not has_amap_key():
         raise RuntimeError("路线规划需要配置环境变量 AMAP_KEY。")
