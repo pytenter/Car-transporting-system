@@ -18,7 +18,7 @@ const OFFLINE_BASEMAP_BOUNDS = {
   south: 22.86,
   north: 23.24
 };
-const REPLAY_SIM_TIME_TO_MS = 78;
+const REPLAY_SIM_TIME_TO_MS = 60;
 /** 连续播放时降低侧栏刷新频率，减轻 DOM 压力，演示更流畅 */
 const REPLAY_SIDE_PANEL_THROTTLE_MS = 120;
 
@@ -1951,8 +1951,8 @@ async function animateSingleCar(route, points, dispatchTime) {
   const metrics = pathMetrics(points);
   const simDuration = Math.max(1, completion - dispatch);
   const durationByTime = simDuration * REPLAY_SIM_TIME_TO_MS;
-  const durationByGeometry = metrics.total * 7;
-  const durationMs = clamp(Math.max(durationByTime, durationByGeometry), 900, 12000);
+  const durationByGeometry = metrics.total * 5.5;
+  const durationMs = clamp(Math.max(durationByTime, durationByGeometry), 700, 7000);
   const preChargeRatio = estimatePreChargeDistanceRatio(route, points, metrics.total);
   const batteryAtTime = buildBatteryInterpolator(
     startBattery,

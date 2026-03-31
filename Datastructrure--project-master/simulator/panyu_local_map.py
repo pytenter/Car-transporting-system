@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import math
 import random
+from dataclasses import replace
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
@@ -10,12 +12,15 @@ from PIL import Image
 
 from .graph import WeightedGraph
 from .models import ChargingStation, SimulationConfig, Task, Vehicle
-from .simulation import SCENARIO_SCALES, ScenarioData, _build_weather_rush_windows
+from .simulation import SCENARIO_SCALES, ScenarioData, ScenarioScale, _build_weather_rush_windows
 
 
 ASSETS_DIR = Path(__file__).with_name("web") / "assets"
 BASEMAP_PATH = ASSETS_DIR / "panyu-basemap.png"
-ROADMASK_PATH = ASSETS_DIR / "panyu-roadmask.png"
+ROADMASK_CANDIDATES = (
+    ASSETS_DIR / "panyu-roadmask.png",
+    ASSETS_DIR / "main_roads_black_white_cropped.png",
+)
 MAP_BOUNDS = {
     "west": 113.15,
     "east": 113.70,
@@ -24,6 +29,10 @@ MAP_BOUNDS = {
 }
 ROAD_THRESHOLD = 208
 PROCESS_MAX_WIDTH = 960
+SPREAD_GRID_COLS = 4
+SPREAD_GRID_ROWS = 3
+LOCAL_CACHE_DIR = Path(__file__).with_name("offline_cache")
+LOCAL_TEMPLATE_CACHE_VERSION = 2
 _TEMPLATE_CACHE: Dict[str, "_RoadTemplate"] = {}
 
 
@@ -39,6 +48,13 @@ def has_panyu_local_map_assets() -> bool:
     return BASEMAP_PATH.exists() and BASEMAP_PATH.is_file()
 
 
+def _roadmask_path() -> Path | None:
+    for path in ROADMASK_CANDIDATES:
+        if path.exists() and path.is_file():
+            return path
+    return None
+
+
 def build_panyu_local_scenario(
     scale_name: str,
     seed: int,
@@ -50,7 +66,7 @@ def build_panyu_local_scenario(
     if not has_panyu_local_map_assets():
         raise RuntimeError(f"Local basemap not found: {BASEMAP_PATH}")
 
-    scale = SCENARIO_SCALES[scale_name]
+    scale = _local_scale(scale_name)
     template = _get_template(scale_name)
     rnd = random.Random(seed)
 
@@ -117,7 +133,7 @@ def build_panyu_local_scenario(
             vehicle_id=vehicle_id,
             capacity=rnd.uniform(9.5, 16.0),
             battery_capacity=battery_capacity,
-            speed=rnd.uniform(1.35, 1.95),
+            speed=rnd.uniform(1.55, 2.25),
             energy_per_distance=rnd.uniform(0.82, 1.06),
             current_node=depot_node,
             battery=battery_capacity * 0.90,
@@ -166,8 +182,14 @@ def _get_template(scale_name: str) -> _RoadTemplate:
     if cached is not None:
         return cached
 
-    explicit_mask = ROADMASK_PATH.exists()
-    image = Image.open(BASEMAP_PATH if not explicit_mask else ROADMASK_PATH).convert("RGB")
+    cached_disk = _load_template_from_disk(scale_name)
+    if cached_disk is not None:
+        _TEMPLATE_CACHE[scale_name] = cached_disk
+        return cached_disk
+
+    roadmask_path = _roadmask_path()
+    explicit_mask = roadmask_path is not None
+    image = Image.open(BASEMAP_PATH if not explicit_mask else roadmask_path).convert("RGB")
     if image.width > PROCESS_MAX_WIDTH:
         scale = PROCESS_MAX_WIDTH / float(image.width)
         resized_height = max(1, int(round(image.height * scale)))
@@ -181,6 +203,7 @@ def _get_template(scale_name: str) -> _RoadTemplate:
     edges = _build_edges(points, mask, width, height, max_neighbors=5, max_distance=190)
     edges = _connect_components(points, edges, mask, width, height)
     template = _RoadTemplate(width=width, height=height, points=points, edges=edges)
+    _save_template_to_disk(scale_name, template)
     _TEMPLATE_CACHE[scale_name] = template
     return template
 
@@ -244,6 +267,19 @@ def _target_graph_nodes(scale_name: str) -> int:
     if scale_name == "medium":
         return 150
     return 260
+
+
+def _local_scale(scale_name: str) -> ScenarioScale:
+    base = SCENARIO_SCALES[scale_name]
+    if scale_name != "small":
+        return base
+    return replace(
+        base,
+        tasks=28,
+        stations=5,
+        horizon=max(base.horizon, 450),
+        max_task_weight=min(20.0, base.max_task_weight + 0.8),
+    )
 
 
 def _select_spread_points(
@@ -373,14 +409,14 @@ def _degree_map(edges: Sequence[Tuple[int, int]], node_count: int) -> Dict[int, 
 
 
 def _pick_depot_node(template: _RoadTemplate, degrees: Dict[int, int]) -> int:
-    target_x = template.width * 0.60
-    target_y = template.height * 0.30
+    target_x = template.width * 0.52
+    target_y = template.height * 0.48
     return min(
         range(len(template.points)),
         key=lambda node_id: (
             abs(template.points[node_id][0] - target_x)
             + abs(template.points[node_id][1] - target_y)
-            - degrees.get(node_id, 0) * 12.0
+            - degrees.get(node_id, 0) * 20.0
         ),
     )
 
@@ -394,27 +430,115 @@ def _pick_spread_nodes(
     *,
     weight_mode: str,
 ) -> List[int]:
-    chosen: List[int] = []
     pool = list(candidates)
     if len(pool) <= count:
         rnd.shuffle(pool)
         return pool[:count]
 
-    while pool and len(chosen) < count:
-        best_idx = 0
-        best_score = None
-        for idx, node_id in enumerate(pool):
-            x, y = template.points[node_id]
-            nearest = min((_pixel_distance((x, y), template.points[item]) for item in chosen), default=9999.0)
-            degree_bonus = degrees.get(node_id, 0) * (20.0 if weight_mode == "degree" else 10.0)
-            center_bias = abs(x - template.width * 0.55) * 0.08 + abs(y - template.height * 0.58) * 0.04
-            random_bias = rnd.random() * (28.0 if weight_mode == "mixed" else 8.0)
-            score = nearest + degree_bonus - center_bias + random_bias
-            if best_score is None or score > best_score:
-                best_score = score
-                best_idx = idx
-        chosen.append(pool.pop(best_idx))
-    return chosen
+    sectors = _group_candidates_by_sector(pool, template)
+    active_keys = [key for key, items in sectors.items() if items]
+    active_keys.sort(key=lambda key: (-len(sectors[key]), key))
+
+    quotas = {key: 0 for key in active_keys}
+    remaining = count
+    while remaining > 0 and active_keys:
+        progressed = False
+        for key in active_keys:
+            if remaining <= 0:
+                break
+            if quotas[key] >= len(sectors[key]):
+                continue
+            quotas[key] += 1
+            remaining -= 1
+            progressed = True
+        if not progressed:
+            break
+
+    chosen: List[int] = []
+    chosen_by_sector: Dict[Tuple[int, int], List[int]] = {key: [] for key in active_keys}
+    while len(chosen) < count:
+        progressed = False
+        for key in active_keys:
+            if len(chosen) >= count:
+                break
+            bucket = [node_id for node_id in sectors[key] if node_id not in chosen]
+            if not bucket or len(chosen_by_sector[key]) >= quotas[key]:
+                continue
+
+            best_node = None
+            best_score = None
+            for node_id in bucket:
+                score = _spread_pick_score(
+                    node_id=node_id,
+                    chosen=chosen,
+                    chosen_local=chosen_by_sector[key],
+                    template=template,
+                    degrees=degrees,
+                    rnd=rnd,
+                    weight_mode=weight_mode,
+                )
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_node = node_id
+            if best_node is None:
+                continue
+            chosen.append(best_node)
+            chosen_by_sector[key].append(best_node)
+            progressed = True
+
+        if not progressed:
+            break
+
+    if len(chosen) < count:
+        remainder = [node_id for node_id in pool if node_id not in chosen]
+        while remainder and len(chosen) < count:
+            best_node = max(
+                remainder,
+                key=lambda node_id: _spread_pick_score(
+                    node_id=node_id,
+                    chosen=chosen,
+                    chosen_local=[],
+                    template=template,
+                    degrees=degrees,
+                    rnd=rnd,
+                    weight_mode=weight_mode,
+                ),
+            )
+            chosen.append(best_node)
+            remainder.remove(best_node)
+    return chosen[:count]
+
+
+def _group_candidates_by_sector(
+    candidates: Sequence[int],
+    template: _RoadTemplate,
+) -> Dict[Tuple[int, int], List[int]]:
+    sectors: Dict[Tuple[int, int], List[int]] = {}
+    for node_id in candidates:
+        x, y = template.points[node_id]
+        col = min(SPREAD_GRID_COLS - 1, max(0, int((x / max(1.0, template.width)) * SPREAD_GRID_COLS)))
+        row = min(SPREAD_GRID_ROWS - 1, max(0, int((y / max(1.0, template.height)) * SPREAD_GRID_ROWS)))
+        sectors.setdefault((col, row), []).append(node_id)
+    return sectors
+
+
+def _spread_pick_score(
+    *,
+    node_id: int,
+    chosen: Sequence[int],
+    chosen_local: Sequence[int],
+    template: _RoadTemplate,
+    degrees: Dict[int, int],
+    rnd: random.Random,
+    weight_mode: str,
+) -> float:
+    point = template.points[node_id]
+    global_nearest = min((_pixel_distance(point, template.points[item]) for item in chosen), default=9999.0)
+    local_nearest = min((_pixel_distance(point, template.points[item]) for item in chosen_local), default=9999.0)
+    degree_bonus = degrees.get(node_id, 0) * (18.0 if weight_mode == "degree" else 7.0)
+    center_bias = abs(point[0] - template.width * 0.5) * 0.03 + abs(point[1] - template.height * 0.5) * 0.02
+    random_bias = rnd.random() * (10.0 if weight_mode == "mixed" else 3.0)
+    return global_nearest * 1.2 + local_nearest * 0.85 + degree_bonus - center_bias + random_bias
 
 
 def _build_tasks(
@@ -434,7 +558,7 @@ def _build_tasks(
     collab_weight_low = max_single_cap + 0.2
     collab_weight_high = min(scale.max_task_weight, max_pair_cap - 0.2)
     if allow_collaboration and collab_weight_high > collab_weight_low:
-        collab_ratio = 0.08 if scale.name == "small" else 0.16
+        collab_ratio = 0.32 if scale.name == "small" else 0.16
         collab_task_count = max(1, int(scale.tasks * collab_ratio))
 
     release_bucket = {"small": 4, "medium": 6, "large": 8}[scale.name]
@@ -511,3 +635,63 @@ def _haversine_km(lng1: float, lat1: float, lng2: float, lat2: float) -> float:
     dl = (lng2 - lng1) * rad
     a = math.sin(dp / 2.0) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2.0) ** 2
     return 6371.0 * 2.0 * math.atan2(math.sqrt(a), math.sqrt(max(1e-12, 1.0 - a)))
+
+
+def _template_cache_path(scale_name: str) -> Path:
+    return LOCAL_CACHE_DIR / f"panyu_template_{scale_name}.json"
+
+
+def _load_template_from_disk(scale_name: str) -> _RoadTemplate | None:
+    path = _template_cache_path(scale_name)
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if int(payload.get("cache_version", 0) or 0) != LOCAL_TEMPLATE_CACHE_VERSION:
+        return None
+
+    points_raw = payload.get("points")
+    edges_raw = payload.get("edges")
+    width = int(payload.get("width", 0) or 0)
+    height = int(payload.get("height", 0) or 0)
+    if width <= 0 or height <= 0 or not isinstance(points_raw, list) or not isinstance(edges_raw, list):
+        return None
+
+    points: List[Tuple[int, int]] = []
+    for item in points_raw:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        points.append((int(item[0]), int(item[1])))
+
+    edges: List[Tuple[int, int]] = []
+    for item in edges_raw:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        src = int(item[0])
+        dst = int(item[1])
+        if src == dst:
+            continue
+        edges.append((min(src, dst), max(src, dst)))
+
+    if len(points) < 16 or len(edges) < 16:
+        return None
+    return _RoadTemplate(width=width, height=height, points=points, edges=edges)
+
+
+def _save_template_to_disk(scale_name: str, template: _RoadTemplate) -> None:
+    LOCAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "cache_version": LOCAL_TEMPLATE_CACHE_VERSION,
+        "width": template.width,
+        "height": template.height,
+        "points": [[x, y] for x, y in template.points],
+        "edges": [[src, dst] for src, dst in template.edges],
+    }
+    _template_cache_path(scale_name).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
