@@ -33,6 +33,27 @@ SPREAD_GRID_COLS = 4
 SPREAD_GRID_ROWS = 3
 LOCAL_CACHE_DIR = Path(__file__).with_name("offline_cache")
 LOCAL_TEMPLATE_CACHE_VERSION = 2
+MAP_ENERGY_CALIBRATION_FACTOR = 0.78
+MAP_SCALE_TUNING = {
+    "small": {
+        "deadline_add": 25,
+        "speed_mul": 1.03,
+        "station_charge_rate_mul": 1.0,
+        "station_ports_add": 0,
+    },
+    "medium": {
+        "deadline_add": 18,
+        "speed_mul": 1.04,
+        "station_charge_rate_mul": 1.35,
+        "station_ports_add": 1,
+    },
+    "large": {
+        "deadline_add": 0,
+        "speed_mul": 1.0,
+        "station_charge_rate_mul": 1.0,
+        "station_ports_add": 0,
+    },
+}
 _TEMPLATE_CACHE: Dict[str, "_RoadTemplate"] = {}
 
 
@@ -134,7 +155,10 @@ def build_panyu_local_scenario(
             capacity=rnd.uniform(9.5, 16.0),
             battery_capacity=battery_capacity,
             speed=rnd.uniform(1.55, 2.25),
-            energy_per_distance=rnd.uniform(0.82, 1.06),
+            # Geographic map distances are materially longer than the synthetic graph's
+            # abstract edge lengths, so calibrate energy intensity downward to keep
+            # route feasibility comparable across scenario sources.
+            energy_per_distance=rnd.uniform(0.82, 1.06) * MAP_ENERGY_CALIBRATION_FACTOR,
             current_node=depot_node,
             battery=battery_capacity * 0.90,
         )
@@ -147,6 +171,7 @@ def build_panyu_local_scenario(
         allow_collaboration=allow_collaboration,
         rnd=rnd,
     )
+    _apply_map_scale_tuning(scale.name, tasks, vehicles, stations)
     for task in tasks:
         node_meta[task.node_id]["name"] = f"番禺区任务点 {task.task_id}"
 
@@ -275,8 +300,8 @@ def _local_scale(scale_name: str) -> ScenarioScale:
         return base
     return replace(
         base,
-        tasks=28,
-        stations=5,
+        tasks=22,
+        stations=4,
         horizon=max(base.horizon, 450),
         max_task_weight=min(20.0, base.max_task_weight + 0.8),
     )
@@ -558,7 +583,7 @@ def _build_tasks(
     collab_weight_low = max_single_cap + 0.2
     collab_weight_high = min(scale.max_task_weight, max_pair_cap - 0.2)
     if allow_collaboration and collab_weight_high > collab_weight_low:
-        collab_ratio = 0.32 if scale.name == "small" else 0.16
+        collab_ratio = _local_map_collab_ratio(scale.name)
         collab_task_count = max(1, int(scale.tasks * collab_ratio))
 
     release_bucket = {"small": 4, "medium": 6, "large": 8}[scale.name]
@@ -593,7 +618,112 @@ def _build_tasks(
                 deadline=deadline,
             )
         )
+    _ensure_small_map_mid_releases(
+        tasks=tasks,
+        scale_name=scale.name,
+        horizon=scale.horizon,
+        release_bucket=release_bucket,
+    )
     return tasks
+
+
+def _local_map_collab_ratio(scale_name: str) -> float:
+    if scale_name == "small":
+        return 0.12
+    if scale_name == "medium":
+        return 0.20
+    return 0.16
+
+
+def _ensure_small_map_mid_releases(
+    tasks: List[Task],
+    scale_name: str,
+    horizon: int,
+    release_bucket: int,
+) -> None:
+    if scale_name != "small" or len(tasks) < 6:
+        return
+
+    window_start = max(0, int(horizon * 0.35))
+    window_end = min(horizon - 1, int(horizon * 0.62))
+    window_start = (window_start // release_bucket) * release_bucket
+    window_end = (window_end // release_bucket) * release_bucket
+    if window_end <= window_start + release_bucket:
+        return
+
+    center = (window_start + window_end) / 2.0
+    movable = [task for task in tasks if not (window_start <= task.release_time <= window_end)]
+    movable.sort(key=lambda item: (abs(item.release_time - center), item.release_time), reverse=True)
+    if not movable:
+        return
+
+    max_mid_gap = max(release_bucket * 6, 24)
+    moved = 0
+    next_idx = 0
+    used = {task.release_time for task in tasks}
+
+    while moved < 3 and next_idx < len(movable):
+        middle_releases = sorted(
+            task.release_time for task in tasks if window_start <= task.release_time <= window_end
+        )
+        anchors = [window_start, *middle_releases, window_end]
+        gap_pairs = [(anchors[idx], anchors[idx + 1]) for idx in range(len(anchors) - 1)]
+        left, right = max(gap_pairs, key=lambda pair: pair[1] - pair[0])
+        if right - left <= max_mid_gap:
+            break
+
+        candidate = left + int((right - left) * 0.5)
+        candidate = (candidate // release_bucket) * release_bucket
+        if candidate <= left:
+            candidate = left + release_bucket
+        if candidate >= right:
+            candidate = right - release_bucket
+
+        while candidate in used and candidate + release_bucket < right:
+            candidate += release_bucket
+        while candidate in used and candidate - release_bucket > left:
+            candidate -= release_bucket
+        if candidate in used or candidate <= left or candidate >= right:
+            break
+
+        task = movable[next_idx]
+        next_idx += 1
+        slack = max(65, task.deadline - task.release_time)
+        task.release_time = candidate
+        task.deadline = candidate + slack
+        used.add(candidate)
+        moved += 1
+
+
+def _apply_map_scale_tuning(
+    scale_name: str,
+    tasks: List[Task],
+    vehicles: Dict[int, Vehicle],
+    stations: Dict[int, ChargingStation],
+) -> None:
+    tuning = MAP_SCALE_TUNING.get(scale_name)
+    if not tuning:
+        return
+
+    deadline_add = int(tuning.get("deadline_add", 0) or 0)
+    speed_mul = float(tuning.get("speed_mul", 1.0) or 1.0)
+    charge_rate_mul = float(tuning.get("station_charge_rate_mul", 1.0) or 1.0)
+    ports_add = int(tuning.get("station_ports_add", 0) or 0)
+
+    if deadline_add:
+        for task in tasks:
+            task.deadline += deadline_add
+
+    if abs(speed_mul - 1.0) > 1e-9:
+        for vehicle in vehicles.values():
+            vehicle.speed *= speed_mul
+
+    if abs(charge_rate_mul - 1.0) > 1e-9 or ports_add:
+        for station in stations.values():
+            station.charge_rate *= charge_rate_mul
+            if ports_add:
+                station.ports = max(1, station.ports + ports_add)
+                station._port_available_times = [0.0 for _ in range(station.ports)]
 
 
 def _pixel_to_lnglat(px: int, py: int, width: int, height: int) -> Tuple[float, float]:

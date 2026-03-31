@@ -144,6 +144,7 @@ class UrgencyDistanceStrategy(DispatchStrategy):
         now: int,
     ) -> Optional[DispatchDecision]:
         best: tuple[float, Task, int] | None = None
+        best_group: tuple[float, Task, List[int]] | None = None
 
         for task in pending_tasks:
             for vehicle_id in free_vehicle_ids:
@@ -165,12 +166,10 @@ class UrgencyDistanceStrategy(DispatchStrategy):
                 if best is None or priority > best[0]:
                     best = (priority, task, vehicle_id)
 
-        if best is not None:
-            return DispatchDecision(task=best[1], vehicle_ids=[best[2]])
-
         if allow_collaboration:
-            best_group: tuple[float, Task, List[int]] | None = None
             for task in pending_tasks:
+                if any(vehicles[vehicle_id].capacity + 1e-9 >= task.weight for vehicle_id in free_vehicle_ids):
+                    continue
                 group, dist_sum = _nearest_collab_group(task, free_vehicle_ids, vehicles, graph)
                 if not group:
                     continue
@@ -179,8 +178,16 @@ class UrgencyDistanceStrategy(DispatchStrategy):
                 priority = 36.0 * task.weight + 1500.0 * urgency - 1.1 * dist_sum
                 if best_group is None or priority > best_group[0]:
                     best_group = (priority, task, group)
-            if best_group is not None:
+
+        if best_group is not None:
+            # Only overweight tasks reach this branch. A small boost prevents them
+            # from being perpetually starved by easier single-vehicle jobs.
+            group_priority = best_group[0] + 80.0
+            if best is None or group_priority >= best[0]:
                 return DispatchDecision(task=best_group[1], vehicle_ids=best_group[2])
+
+        if best is not None:
+            return DispatchDecision(task=best[1], vehicle_ids=[best[2]])
 
         return None
 
