@@ -136,6 +136,20 @@ def _clean_reduced_label(value: object) -> str:
     return text or "-"
 
 
+def _mean_dict_metric(summaries: List[object], attr_name: str) -> Dict[int, float]:
+    acc: Dict[int, List[float]] = {}
+    for summary in summaries:
+        metric = getattr(summary, attr_name, {})
+        for key, value in metric.items():
+            acc.setdefault(int(key), []).append(float(value))
+    return {key: (sum(values) / len(values) if values else 0.0) for key, values in acc.items()}
+
+
+def _mean_summary_metric(summaries: List[object], attr_name: str) -> float:
+    values = [float(getattr(summary, attr_name, 0.0)) for summary in summaries]
+    return statistics.mean(values) if values else 0.0
+
+
 def _prepare_terminal_display_rows(rows: List[dict]) -> List[dict]:
     display_rows: List[dict] = []
     for row in rows:
@@ -463,12 +477,6 @@ def main() -> None:
             avg_response_mean = statistics.mean([float(s.avg_response_time) for s in summaries])
             charging_wait_mean = statistics.mean([float(s.total_charging_wait) for s in summaries])
 
-            station_util_acc: Dict[int, List[float]] = {}
-            for s in summaries:
-                for sid, util in s.station_utilization.items():
-                    station_util_acc.setdefault(int(sid), []).append(float(util))
-            station_util_avg = {sid: (sum(vals) / len(vals) if vals else 0.0) for sid, vals in station_util_acc.items()}
-
             row = {
                 "scenario": scale,
                 "strategy": strategy_name,
@@ -481,7 +489,16 @@ def main() -> None:
                 "charging_wait": float(charging_wait_mean),
                 "score": float(score_mean),
                 "score_std": float(score_std),
-                "station_utilization": station_util_avg,
+                "station_utilization": _mean_dict_metric(summaries, "station_utilization"),
+                "station_avg_utilization": _mean_dict_metric(summaries, "station_avg_utilization"),
+                "station_peak_utilization": _mean_dict_metric(summaries, "station_peak_utilization"),
+                "station_charging_sessions": _mean_dict_metric(summaries, "station_charging_sessions"),
+                "station_max_wait_time": _mean_dict_metric(summaries, "station_max_wait_time"),
+                "charging_sessions": _mean_summary_metric(summaries, "charging_sessions"),
+                "max_charging_wait": _mean_summary_metric(summaries, "max_charging_wait"),
+                "collaborative_tasks": _mean_summary_metric(summaries, "collaborative_tasks"),
+                "collaborative_task_ratio": _mean_summary_metric(summaries, "collaborative_task_ratio"),
+                "max_vehicles_per_task": _mean_summary_metric(summaries, "max_vehicles_per_task"),
                 "seed": base_scenario_seed,
                 "seed_runs": seed_runs,
                 "allow_collaboration": args.allow_collaboration,

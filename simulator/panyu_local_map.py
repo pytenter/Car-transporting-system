@@ -586,7 +586,7 @@ def _build_tasks(
         collab_ratio = _local_map_collab_ratio(scale.name)
         collab_task_count = max(1, int(scale.tasks * collab_ratio))
 
-    release_bucket = {"small": 4, "medium": 6, "large": 8}[scale.name]
+    release_bucket = {"small": 4, "medium": 6, "large": 8, "stress": 3}[scale.name]
     jitter = max(2, int(scale.horizon * 0.03))
     peak_count = max(3, scale.tasks // 18)
     release_upper = int(scale.horizon * (0.80 if scale.name == "small" else 1.0))
@@ -630,6 +630,8 @@ def _build_tasks(
 def _local_map_collab_ratio(scale_name: str) -> float:
     if scale_name == "small":
         return 0.12
+    if scale_name == "stress":
+        return 0.22
     if scale_name == "medium":
         return 0.20
     return 0.16

@@ -9,13 +9,13 @@
 项目同时支持两类研究视角：
 
 - 在线动态调度：任务按时间释放，策略只能基于当前状态做决策。
-- 静态全信息基线：使用 CPLEX 对已知全任务集合进行精确求解，形成与动态策略对照的全局优化基准。
+- 静态全信息基线：使用 CPLEX 对已知全任务集合建立数学规划并限时求解，形成与动态策略对照的优化基线；若求解器证明最优，则可作为全局最优基准。
 
 ---
 
 ## 核心能力
 
-- 支持 `small / medium / large` 三种场景规模。
+- 支持 `small / medium / large` 三种基础场景规模，并提供 `stress` 充电压力场景用于展示排队与负荷。
 - 支持 7 种动态调度策略：
   - `nearest_task_first`
   - `max_task_first`
@@ -26,6 +26,7 @@
   - `hyper_heuristic_ucb`
 - 车辆约束建模：载重、电池容量、速度、单位里程能耗、可用时刻。
 - 充电约束建模：充电站功率、端口数、排队等待、空闲补能。
+- 充电负荷统计：输出充电会话数、最大等待时间、站点平均利用率和峰值利用率。
 - 多车协同：超重任务可由多车按容量比例协同执行。
 - 天气/路况扰动：`normal / rain / congestion` 三种模式，影响交通倍率与回放效果。
 - 地图来源可切换：
@@ -42,6 +43,8 @@
   - `events.json`
   - `comparison_report.md`
   - `weather_stats.json`
+
+课程验收时可先阅读 [`ASSIGNMENT_ALIGNMENT.md`](ASSIGNMENT_ALIGNMENT.md)，其中按作业要求逐项列出了对应实现位置、演示命令和答辩表述建议。
 
 ---
 
@@ -148,7 +151,7 @@ flowchart LR
 ### 4. 精确基线
 
 - `simulator/exact_solver.py` 提供静态全信息 MIP 求解逻辑。
-- 实验使用 `CPLEX` 作为精确求解后端，对 `small / medium / large` 三种规模均生成静态基线结果。
+- 实验使用 `CPLEX` 作为静态全信息求解后端，对 `small / medium / large` 三种规模生成优化基线结果。若求解状态未证明最优，应在报告中按“限时优化基线”解释。
 - 通过静态全信息基线与在线动态策略对比，可以分析实时决策与全局优化方案之间的收益、超时率和路径成本差异。
 
 ### 5. 可视化层
@@ -262,6 +265,17 @@ python main.py --no-oracle --allow-collaboration --seed-runs 3 --output results/
 - `--allow-collaboration`：允许多车协同服务超重任务
 - `--seed-runs 3`：每个场景重复 3 次，输出均值/标准差
 
+### 2.1 运行充电压力场景
+
+```bash
+python main.py --no-oracle --scales stress --strategies nearest_task_first urgency_distance hyper_heuristic_ucb --allow-collaboration --export-events --output results/summary_stress.json --events-output results/events_stress.json
+```
+
+说明：
+
+- `stress` 场景会降低初始电量和充电资源，强化充电站排队、负荷压力和协同任务展示。
+- 输出中可重点查看 `charging_sessions`、`max_charging_wait`、`station_avg_utilization`、`station_peak_utilization`、`collaborative_tasks`。
+
 ### 3. 运行动态 vs 静态（CPLEX）对比
 
 ```bash
@@ -350,6 +364,9 @@ python dashboard.py
 - `distance` 反映总运输里程。
 - `avg_response_time` 反映从任务释放到完成的平均响应耗时。
 - `charging_wait` 反映充电拥塞带来的额外等待成本。
+- `charging_sessions / max_charging_wait` 反映充电行为次数和最严重排队等待。
+- `station_avg_utilization / station_peak_utilization` 反映充电站全过程平均负荷和峰值负荷。
+- `collaborative_tasks / collaborative_task_ratio` 反映多车协同完成任务的数量和比例。
 - 在协同模式下，部分超重任务会由多车共同完成，因此应结合 `events.json` 与回放观察任务拆分细节。
 
 ---

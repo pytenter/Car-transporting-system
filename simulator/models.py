@@ -34,6 +34,10 @@ class ChargingStation:
     charge_rate: float
     ports: int
     _port_available_times: List[float] = field(default_factory=list)
+    _busy_intervals: List[tuple[float, float]] = field(default_factory=list)
+    total_sessions: int = 0
+    total_wait_time: float = 0.0
+    max_wait_time: float = 0.0
 
     def __post_init__(self) -> None:
         if not self._port_available_times:
@@ -51,11 +55,38 @@ class ChargingStation:
         start = max(arrival_time, self._port_available_times[best_port])
         finish = start + charge_duration
         self._port_available_times[best_port] = finish
+        wait_time = start - arrival_time
+        self.total_sessions += 1
+        self.total_wait_time += wait_time
+        self.max_wait_time = max(self.max_wait_time, wait_time)
+        if charge_duration > 1e-9:
+            self._busy_intervals.append((start, finish))
         return start, finish
 
     def utilization(self, now: float) -> float:
         busy = sum(1 for end_time in self._port_available_times if end_time > now)
         return busy / float(self.ports)
+
+    def average_utilization(self, horizon_end: float) -> float:
+        if horizon_end <= 0 or self.ports <= 0:
+            return 0.0
+        busy_time = sum(max(0.0, min(end, horizon_end) - max(0.0, start)) for start, end in self._busy_intervals)
+        return min(1.0, busy_time / (float(self.ports) * horizon_end))
+
+    def peak_utilization(self) -> float:
+        if not self._busy_intervals or self.ports <= 0:
+            return 0.0
+        points: List[tuple[float, int]] = []
+        for start, end in self._busy_intervals:
+            points.append((start, 1))
+            points.append((end, -1))
+        points.sort(key=lambda item: (item[0], item[1]))
+        busy = 0
+        peak = 0
+        for _, delta in points:
+            busy += delta
+            peak = max(peak, busy)
+        return min(1.0, peak / float(self.ports))
 
 
 @dataclass
@@ -156,3 +187,12 @@ class SimulationSummary:
     total_charging_wait: float
     final_score: float
     station_utilization: Dict[int, float]
+    station_avg_utilization: Dict[int, float] = field(default_factory=dict)
+    station_peak_utilization: Dict[int, float] = field(default_factory=dict)
+    station_charging_sessions: Dict[int, int] = field(default_factory=dict)
+    station_max_wait_time: Dict[int, float] = field(default_factory=dict)
+    charging_sessions: int = 0
+    max_charging_wait: float = 0.0
+    collaborative_tasks: int = 0
+    collaborative_task_ratio: float = 0.0
+    max_vehicles_per_task: int = 1

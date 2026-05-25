@@ -73,6 +73,16 @@ SCENARIO_SCALES: Dict[str, ScenarioScale] = {
         horizon=1250,
         max_task_weight=20.0,
     ),
+    "stress": ScenarioScale(
+        name="stress",
+        nodes=42,
+        extra_edges=78,
+        vehicles=8,
+        stations=2,
+        tasks=55,
+        horizon=430,
+        max_task_weight=20.0,
+    ),
 }
 
 WEATHER_MODES = ("normal", "rain", "congestion")
@@ -111,8 +121,12 @@ def build_scenario(
 
     stations: Dict[int, ChargingStation] = {}
     for station_id, node_id in enumerate(station_nodes):
-        charge_rate = rnd.uniform(3.6, 6.4)
-        ports = rnd.randint(1, 3)
+        if scale.name == "stress":
+            charge_rate = rnd.uniform(2.6, 3.8)
+            ports = 1
+        else:
+            charge_rate = rnd.uniform(3.6, 6.4)
+            ports = rnd.randint(1, 3)
         stations[station_id] = ChargingStation(
             station_id=station_id,
             node_id=node_id,
@@ -122,15 +136,24 @@ def build_scenario(
 
     vehicles: Dict[int, Vehicle] = {}
     for vehicle_id in range(scale.vehicles):
-        battery_capacity = rnd.uniform(130.0, 220.0)
+        if scale.name == "stress":
+            battery_capacity = rnd.uniform(88.0, 135.0)
+            speed = rnd.uniform(1.35, 1.95)
+            energy_per_distance = rnd.uniform(1.28, 1.58)
+            initial_battery_ratio = rnd.uniform(0.50, 0.62)
+        else:
+            battery_capacity = rnd.uniform(130.0, 220.0)
+            speed = rnd.uniform(1.5, 2.4)
+            energy_per_distance = rnd.uniform(0.82, 1.15)
+            initial_battery_ratio = 0.90
         vehicles[vehicle_id] = Vehicle(
             vehicle_id=vehicle_id,
             capacity=rnd.uniform(9.5, 16.0),
             battery_capacity=battery_capacity,
-            speed=rnd.uniform(1.5, 2.4),
-            energy_per_distance=rnd.uniform(0.82, 1.15),
+            speed=speed,
+            energy_per_distance=energy_per_distance,
             current_node=depot_node,
-            battery=battery_capacity * 0.90,
+            battery=battery_capacity * initial_battery_ratio,
         )
 
     tasks: List[Task] = []
@@ -144,13 +167,18 @@ def build_scenario(
     collab_weight_low = max_single_cap + 0.2
     collab_weight_high = min(scale.max_task_weight, max_pair_cap - 0.2)
     if allow_collaboration and collab_weight_high > collab_weight_low:
-        collab_ratio = 0.08 if scale.name == "small" else 0.16
+        if scale.name == "small":
+            collab_ratio = 0.08
+        elif scale.name == "stress":
+            collab_ratio = 0.22
+        else:
+            collab_ratio = 0.16
         collab_task_count = max(1, int(scale.tasks * collab_ratio))
 
     # Generate clustered task release times to create realistic dispatch peaks.
-    release_bucket = {"small": 4, "medium": 6, "large": 8}[scale.name]
+    release_bucket = {"small": 4, "medium": 6, "large": 8, "stress": 3}[scale.name]
     jitter = max(2, int(scale.horizon * 0.03))
-    peak_count = max(3, scale.tasks // 18)
+    peak_count = max(3, scale.tasks // (12 if scale.name == "stress" else 18))
     release_upper = int(scale.horizon * (0.80 if scale.name == "small" else 1.0))
     release_upper = max(release_bucket, min(scale.horizon - 1, release_upper))
     peak_centers = [rnd.randint(0, release_upper) for _ in range(peak_count)]
@@ -168,7 +196,10 @@ def build_scenario(
             weight = round(rnd.uniform(collab_weight_low, collab_weight_high), 2)
         else:
             weight = round(rnd.uniform(1.5, max(1.6, task_weight_high)), 2)
-        deadline = release + rnd.randint(65, 190)
+        if scale.name == "stress":
+            deadline = release + rnd.randint(75, 165)
+        else:
+            deadline = release + rnd.randint(65, 190)
         node = graph.nodes[node_id]
         tasks.append(
             Task(
@@ -191,13 +222,13 @@ def build_scenario(
         overtime_penalty=70.0,
         unserved_penalty=60.0,
         allow_collaboration=allow_collaboration,
-        min_battery_reserve_ratio=0.22 if scale.name == "small" else 0.30,
-        task_end_target_ratio=0.45 if scale.name == "small" else 0.55,
-        idle_recharge_trigger_ratio=0.45 if scale.name == "small" else 0.55,
-        idle_recharge_target_ratio=0.90,
+        min_battery_reserve_ratio=0.18 if scale.name == "stress" else (0.22 if scale.name == "small" else 0.30),
+        task_end_target_ratio=0.34 if scale.name == "stress" else (0.45 if scale.name == "small" else 0.55),
+        idle_recharge_trigger_ratio=0.42 if scale.name == "stress" else (0.45 if scale.name == "small" else 0.55),
+        idle_recharge_target_ratio=0.76 if scale.name == "stress" else 0.90,
         allow_depot_charging=True,
-        depot_charge_rate=7.2,
-        depot_charge_ports=max(3, min(8, scale.vehicles // 3)),
+        depot_charge_rate=3.2 if scale.name == "stress" else 7.2,
+        depot_charge_ports=1 if scale.name == "stress" else max(3, min(8, scale.vehicles // 3)),
         rush_windows=_build_weather_rush_windows(scale=scale, rnd=rnd, weather_mode=weather_mode),
         weather_mode=weather_mode,
         map_mode="synthetic",
@@ -415,8 +446,33 @@ class FleetSimulator:
             final_score=total_score,
             station_utilization={
                 station_id: station.utilization(last_now)
-                for station_id, station in self.stations.items()
+                for station_id, station in self._charging_resource_map().items()
             },
+            station_avg_utilization={
+                station_id: station.average_utilization(last_now)
+                for station_id, station in self._charging_resource_map().items()
+            },
+            station_peak_utilization={
+                station_id: station.peak_utilization()
+                for station_id, station in self._charging_resource_map().items()
+            },
+            station_charging_sessions={
+                station_id: station.total_sessions
+                for station_id, station in self._charging_resource_map().items()
+            },
+            station_max_wait_time={
+                station_id: station.max_wait_time
+                for station_id, station in self._charging_resource_map().items()
+            },
+            charging_sessions=sum(station.total_sessions for station in self._iter_candidate_stations()),
+            max_charging_wait=max((station.max_wait_time for station in self._iter_candidate_stations()), default=0.0),
+            collaborative_tasks=sum(1 for event in events if len(event.vehicle_ids) > 1),
+            collaborative_task_ratio=(
+                sum(1 for event in events if len(event.vehicle_ids) > 1) / len(completed)
+                if completed
+                else 0.0
+            ),
+            max_vehicles_per_task=max((len(event.vehicle_ids) for event in events), default=1),
         )
         return summary, completed, events
 
@@ -597,6 +653,12 @@ class FleetSimulator:
         if self.config.allow_depot_charging:
             stations.append(self.depot_charger)
         return stations
+
+    def _charging_resource_map(self) -> Dict[int, ChargingStation]:
+        resources = dict(self.stations)
+        if self.config.allow_depot_charging:
+            resources[self.depot_charger.station_id] = self.depot_charger
+        return resources
 
     def _run_idle_recharge(self, free_vehicle_ids: Sequence[int], now: float) -> List[int]:
         for vehicle_id in free_vehicle_ids:

@@ -1,0 +1,140 @@
+[
+  {
+    "scenario": "stress",
+    "strategy": "nearest_task_first",
+    "mode": "dynamic",
+    "completed": 11,
+    "unserved": 44,
+    "overtime": 0,
+    "distance": 474.1975501390641,
+    "avg_response_time": 36.58061726999532,
+    "charging_wait": 16.506300921138433,
+    "score": -412.97675177404926,
+    "score_std": 0.0,
+    "station_utilization": {
+      "0": 0.0,
+      "1": 0.0,
+      "-1": 0.0
+    },
+    "station_avg_utilization": {
+      "0": 0.0,
+      "1": 0.0,
+      "-1": 0.4363643607602109
+    },
+    "station_peak_utilization": {
+      "0": 0.0,
+      "1": 0.0,
+      "-1": 1.0
+    },
+    "station_charging_sessions": {
+      "0": 0.0,
+      "1": 0.0,
+      "-1": 28.0
+    },
+    "station_max_wait_time": {
+      "0": 0.0,
+      "1": 0.0,
+      "-1": 51.45269400526189
+    },
+    "charging_sessions": 28.0,
+    "max_charging_wait": 51.45269400526189,
+    "collaborative_tasks": 0.0,
+    "collaborative_task_ratio": 0.0,
+    "max_vehicles_per_task": 1.0,
+    "seed": 20260309,
+    "seed_runs": 1,
+    "allow_collaboration": true
+  },
+  {
+    "scenario": "stress",
+    "strategy": "urgency_distance",
+    "mode": "dynamic",
+    "completed": 9,
+    "unserved": 46,
+    "overtime": 1,
+    "distance": 431.7904515986906,
+    "avg_response_time": 65.9551254421786,
+    "charging_wait": 127.1156431725003,
+    "score": -1310.2262681550712,
+    "score_std": 0.0,
+    "station_utilization": {
+      "0": 0.0,
+      "1": 0.0,
+      "-1": 0.0
+    },
+    "station_avg_utilization": {
+      "0": 0.0,
+      "1": 0.0,
+      "-1": 0.4375665767065508
+    },
+    "station_peak_utilization": {
+      "0": 0.0,
+      "1": 0.0,
+      "-1": 1.0
+    },
+    "station_charging_sessions": {
+      "0": 0.0,
+      "1": 0.0,
+      "-1": 30.0
+    },
+    "station_max_wait_time": {
+      "0": 0.0,
+      "1": 0.0,
+      "-1": 51.45269400526189
+    },
+    "charging_sessions": 30.0,
+    "max_charging_wait": 51.45269400526189,
+    "collaborative_tasks": 2.0,
+    "collaborative_task_ratio": 0.2222222222222222,
+    "max_vehicles_per_task": 2.0,
+    "seed": 20260309,
+    "seed_runs": 1,
+    "allow_collaboration": true
+  },
+  {
+    "scenario": "stress",
+    "strategy": "hyper_heuristic_ucb",
+    "mode": "dynamic",
+    "completed": 11,
+    "unserved": 44,
+    "overtime": 1,
+    "distance": 474.1975501390641,
+    "avg_response_time": 56.169346306734106,
+    "charging_wait": 25.808243686962214,
+    "score": -690.0044558994252,
+    "score_std": 0.0,
+    "station_utilization": {
+      "0": 0.0,
+      "1": 0.0,
+      "-1": 0.0
+    },
+    "station_avg_utilization": {
+      "0": 0.0,
+      "1": 0.0,
+      "-1": 0.43491304991967283
+    },
+    "station_peak_utilization": {
+      "0": 0.0,
+      "1": 0.0,
+      "-1": 1.0
+    },
+    "station_charging_sessions": {
+      "0": 0.0,
+      "1": 0.0,
+      "-1": 28.0
+    },
+    "station_max_wait_time": {
+      "0": 0.0,
+      "1": 0.0,
+      "-1": 51.45269400526189
+    },
+    "charging_sessions": 28.0,
+    "max_charging_wait": 51.45269400526189,
+    "collaborative_tasks": 0.0,
+    "collaborative_task_ratio": 0.0,
+    "max_vehicles_per_task": 1.0,
+    "seed": 20260309,
+    "seed_runs": 1,
+    "allow_collaboration": true
+  }
+]
