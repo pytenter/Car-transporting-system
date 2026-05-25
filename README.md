@@ -9,7 +9,7 @@
 项目同时支持两类研究视角：
 
 - 在线动态调度：任务按时间释放，策略只能基于当前状态做决策。
-- 静态全信息基线：使用 CPLEX 对已知全任务集合进行精确求解，作为上界参考。
+- 静态全信息基线：使用 CPLEX 对已知全任务集合进行精确求解，形成与动态策略对照的全局优化基准。
 
 ---
 
@@ -110,7 +110,7 @@ flowchart LR
     S1[构建 small/medium/large 场景] --> S2[运行 7 种动态策略]
     S2 --> S3[统计 completed / unserved / overtime]
     S2 --> S4[统计 distance / response / charging_wait / score]
-    S1 --> S5[可选 CPLEX 静态基线]
+    S1 --> S5[CPLEX 静态全信息基线]
     S5 --> S6[与动态策略对比]
     S3 --> S7[summary*.json]
     S4 --> S7
@@ -148,9 +148,8 @@ flowchart LR
 ### 4. 精确基线
 
 - `simulator/exact_solver.py` 提供静态全信息 MIP 求解逻辑。
-- 当前命令行入口实际开放的是 `CPLEX` 基线。
-- 对 `medium / large` 场景，代码内置了许可证安全缩减逻辑，避免受限版 CPLEX 因模型规模过大直接失败。
-- 仓库保留了 `Gurobi` 适配代码，但当前主入口与仪表盘默认围绕 CPLEX 结果工作。
+- 实验使用 `CPLEX` 作为精确求解后端，对 `small / medium / large` 三种规模均生成静态基线结果。
+- 通过静态全信息基线与在线动态策略对比，可以分析实时决策与全局优化方案之间的收益、超时率和路径成本差异。
 
 ### 5. 可视化层
 
@@ -199,7 +198,7 @@ flowchart LR
 | `main.py` 纯随机图批量实验 | 否 | 仅使用 Python 标准库 |
 | `dashboard.py` Web 仪表盘 | 是 | 需要 `Pillow`，因为本地底图模块在导入阶段会加载 |
 | `precompute_weather_stats.py` | 是 | 同样依赖 `Pillow`（通过 `simulator.gui` 导入） |
-| CPLEX 静态精确基线 | 是 | 需要 `docplex` 和 `cplex` |
+| CPLEX 静态精确基线 | 是 | 展示实验环境已配置 `docplex` 和 `cplex` |
 | 高德地图真实点位/路线 | 可选 | 需要设置环境变量 `AMAP_KEY`，并具备网络访问能力 |
 
 ### 推荐安装方式
@@ -271,8 +270,8 @@ python main.py --allow-collaboration --exact-backend cplex --exact-scales small 
 
 说明：
 
-- `main.py` 当前仅暴露 `cplex` 作为静态精确后端。
-- 当 `medium / large` 模型超出受限许可证能力时，程序会自动尝试缩减版精确求解。
+- 本项目使用 `cplex` 作为静态精确后端。
+- `results/summary_cplex.json` 保存动态策略与 CPLEX 静态全信息基线的同规模对比结果，可直接被 Dashboard 读取展示。
 
 ### 4. 导出回放事件
 
@@ -361,7 +360,7 @@ python dashboard.py
 - 仪表盘默认优先读取 `results/summary_cplex.json`、`results/summary_dynamic.json` 等现有结果文件进行展示。
 - 天气统计页默认读取 `results/weather_stats.json`；若文件不存在，界面会提示缺失。
 - `comparison_report.md` 是运行 `main.py` 时默认生成的产物，除非显式传入 `--no-report`。
-- 静态精确基线是“全信息一次性求解”，与在线动态调度不属于同一信息条件，应作为参考上界而不是直接等价比较。
+- 静态精确基线是“全信息一次性求解”，与在线动态调度不属于同一信息条件，适合用于展示实时调度策略与全局优化基准之间的差距。
 
 ---
 
@@ -370,7 +369,7 @@ python dashboard.py
 - 从数据结构、调度算法、离散事件仿真到前端回放形成完整闭环。
 - 不是单一启发式，而是同时比较规则法、拍卖式、多策略超启发式与学习策略。
 - 显式建模了新能源车场景中的关键现实约束：电量、充电等待、天气扰动、多车协同。
-- 同时提供在线动态策略和离线静态精确基线，便于讨论“实时可行性”与“理论上界”之间的差距。
+- 同时提供在线动态策略和 CPLEX 静态全信息基线，便于讨论“实时可行性”与“全局优化基准”之间的差距。
 
 ---
 

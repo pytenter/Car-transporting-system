@@ -284,10 +284,7 @@ def load_offline_scenario(
     )
 
     tasks.sort(key=lambda item: (item.release_time, item.task_id))
-    scenario = ScenarioData(graph=graph, tasks=tasks, vehicles=vehicles, stations=stations, config=config, node_meta=node_meta)
-    if is_fixed_offline_scope(scope.city_name, scope.district_name):
-        save_offline_scenario(scale_name, scenario)
-    return scenario
+    return ScenarioData(graph=graph, tasks=tasks, vehicles=vehicles, stations=stations, config=config, node_meta=node_meta)
 
 
 def build_amap_scenario(
