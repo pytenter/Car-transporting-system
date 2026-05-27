@@ -235,7 +235,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
 function bindEvents() {
   dom.runBtn.addEventListener("click", () => void runSimulation());
-  dom.mapModeBtn?.addEventListener("click", () => void runMapSimulation());
+  dom.mapModeBtn?.addEventListener("click", () => void toggleMapMode());
   dom.compareBtn.addEventListener("click", () => void compareStrategies());
   dom.playBtn.addEventListener("click", () => void playReplay());
   dom.pauseBtn.addEventListener("click", pauseReplay);
@@ -628,9 +628,27 @@ function updateMapModeButton() {
     return;
   }
   const active = isGeoReplayAvailable();
-  dom.mapModeBtn.textContent = active ? "地图模式中" : "地图模式";
+  dom.mapModeBtn.textContent = active ? "退出地图模式" : "地图模式";
   dom.mapModeBtn.classList.toggle("active", active);
   dom.mapModeBtn.setAttribute("aria-pressed", active ? "true" : "false");
+}
+
+async function toggleMapMode() {
+  if (isGeoReplayAvailable()) {
+    hideGeoMapPanel();
+    setGeoLoading("", false);
+    renderStaticMapBase();
+    renderReplayAt(state.currentTime || 0, {
+      appendLogs: false,
+      initialSummary: (state.currentTime || 0) <= 1e-9,
+      preDispatch: state.preDispatchView,
+      throttleSidePanels: true
+    });
+    setStatus("状态：已退出地图模式，当前为普通仿真模式");
+    return;
+  }
+
+  await runMapSimulation();
 }
 
 function showGeoMapPanel() {
@@ -706,17 +724,31 @@ async function runMapSimulation() {
 }
 
 async function runSimulation() {
-  const payload = readCommonPayload();
-  hideGeoMapPanel();
-  setStatus("状态：仿真运行中…");
+  const keepMapMode = isGeoReplayAvailable();
+  const payload = keepMapMode ? readMapPayload() : readCommonPayload();
+  if (!keepMapMode) {
+    hideGeoMapPanel();
+  } else {
+    showGeoMapPanel();
+    setGeoLoading("正在重新生成地图场景...", true);
+  }
+  setStatus(keepMapMode ? "状态：地图模式仿真运行中…" : "状态：仿真运行中…");
 
   try {
     const data = await postJson("/api/run", payload);
     hydrateRunData(data);
+    if (keepMapMode) {
+      showGeoMapPanel();
+      await ensureGeoReplayReady();
+    }
     renderStaticMapBase();
     renderReplayAt(0, { appendLogs: false, initialSummary: true, preDispatch: true });
     dom.logBox.textContent = "";
-    setStatus(`状态：仿真完成，共 ${state.events.length} 条派单事件`);
+    const fallbackMsg =
+      keepMapMode && state.lastMapRouteFailureCount > 0
+        ? `，其中 ${state.lastMapRouteFailureCount} 条路线回退为节点连线`
+        : "";
+    setStatus(`状态：${keepMapMode ? "地图模式" : ""}仿真完成，共 ${state.events.length} 条派单事件${fallbackMsg}`);
   } catch (err) {
     setStatus(`状态：仿真失败 — ${err.message}`, true);
   }
