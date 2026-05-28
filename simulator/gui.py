@@ -654,6 +654,13 @@ def _load_weather_stats_payload() -> dict:
             if isinstance(item, dict):
                 rows.append(item)
 
+    rows, supplemented = _supplement_missing_dynamic_weather_rows(rows)
+    if supplemented:
+        try:
+            path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
     scales = sorted({str(row.get("scenario", "")) for row in rows if row.get("scenario")})
     weather_modes = sorted({str(row.get("weather", "")) for row in rows if row.get("weather")})
     strategies = sorted({str(row.get("strategy", "")) for row in rows if row.get("strategy")})
@@ -666,6 +673,86 @@ def _load_weather_stats_payload() -> dict:
         "saved_file": path.name,
         "updated_at": _format_mtime(path),
     }
+
+
+def _supplement_missing_dynamic_weather_rows(rows: List[dict]) -> tuple[List[dict], bool]:
+    if not rows:
+        return rows, False
+
+    dynamic_keys = {
+        (
+            str(row.get("scenario", "")),
+            str(row.get("weather", "")),
+            str(row.get("strategy", "")),
+        )
+        for row in rows
+        if str(row.get("mode", "")) == "dynamic"
+    }
+    scales = [
+        scale
+        for scale in SCENARIO_SCALES.keys()
+        if any(str(row.get("scenario", "")) == scale for row in rows)
+    ]
+    weather_modes = [
+        weather
+        for weather in WEATHER_MODES
+        if any(str(row.get("weather", "")) == weather for row in rows)
+    ]
+    if not scales or not weather_modes:
+        return rows, False
+
+    added = False
+    merged_rows = list(rows)
+    for scale in scales:
+        for weather_mode in weather_modes:
+            missing = [
+                name
+                for name in STRATEGY_REGISTRY.keys()
+                if (scale, weather_mode, name) not in dynamic_keys
+            ]
+            if not missing:
+                continue
+
+            scenario_seed = _weather_row_seed(rows, scale, weather_mode)
+            scenario = build_scenario(
+                scale_name=scale,
+                seed=scenario_seed,
+                allow_collaboration=True,
+                weather_mode=weather_mode,
+            )
+            strategies = [
+                _build_strategy_instance(name, scenario_seed + list(STRATEGY_REGISTRY.keys()).index(name))
+                for name in missing
+            ]
+            for summary, _, _ in run_strategies_for_scenario(scenario, strategies):
+                merged_rows.append(
+                    {
+                        "scenario": summary.scenario,
+                        "weather": weather_mode,
+                        "strategy": summary.strategy,
+                        "mode": "dynamic",
+                        "completed": summary.completed_tasks,
+                        "overtime": summary.overtime_tasks,
+                        "unserved": summary.unserved_tasks,
+                        "score": summary.final_score,
+                        "distance": summary.total_distance,
+                        "avg_response_time": summary.avg_response_time,
+                        "charging_wait": summary.total_charging_wait,
+                        "seed": scenario_seed,
+                        "source": "supplemented_cache",
+                    }
+                )
+                dynamic_keys.add((scale, weather_mode, summary.strategy))
+                added = True
+
+    return merged_rows, added
+
+
+def _weather_row_seed(rows: List[dict], scale: str, weather_mode: str) -> int:
+    for row in rows:
+        if str(row.get("scenario", "")) == scale and str(row.get("weather", "")) == weather_mode:
+            return _safe_int(row.get("seed", _scenario_seed_for_scale(20260309, scale)), _scenario_seed_for_scale(20260309, scale))
+    return _scenario_seed_for_scale(20260309, scale)
 
 
 def _load_normal_static_cplex_rows(seed: int, allow_collaboration: bool) -> Dict[str, dict]:

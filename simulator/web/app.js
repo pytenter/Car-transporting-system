@@ -2479,7 +2479,7 @@ function renderWeatherStatsTable(rows) {
   table.className = "benchmark-table";
   const thead = document.createElement("thead");
   const trh = document.createElement("tr");
-  ["场景", "天气", "策略", "模式", "完成", "超时", "未完成"].forEach((name) => {
+  ["场景", "天气", "策略", "模式", "得分", "完成", "超时", "未完成"].forEach((name) => {
     const th = document.createElement("th");
     th.textContent = name;
     trh.appendChild(th);
@@ -2493,6 +2493,7 @@ function renderWeatherStatsTable(rows) {
       zhWeather(row.weather),
       zhStrategy(row.strategy),
       zhMode(row.mode),
+      formatMetricValue("score", numberValue(row.score)),
       String(numberValue(row.completed).toFixed(0)),
       String(numberValue(row.overtime).toFixed(0)),
       String(numberValue(row.unserved).toFixed(0))
