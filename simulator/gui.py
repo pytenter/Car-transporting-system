@@ -29,6 +29,7 @@ from .simulation import SCENARIO_SCALES, WEATHER_MODES, FleetSimulator, Scenario
 from .strategies import (
     AuctionBasedStrategy,
     HyperHeuristicStrategy,
+    LargeNeighborhoodSearchStrategy,
     MaxWeightFirstStrategy,
     NearestTaskFirstStrategy,
     ReinforcementLearningDispatchStrategy,
@@ -43,6 +44,7 @@ STRATEGY_REGISTRY = {
     "urgency_distance": UrgencyDistanceStrategy,
     "auction_multi_agent": AuctionBasedStrategy,
     "metaheuristic_sa": SimulatedAnnealingStrategy,
+    "lns_aaai_2025": LargeNeighborhoodSearchStrategy,
     "reinforcement_q": ReinforcementLearningDispatchStrategy,
     "hyper_heuristic_ucb": HyperHeuristicStrategy,
 }
@@ -55,6 +57,11 @@ BENCHMARK_PRESETS: List[Tuple[str, str, str]] = [
     ("cplex", "动态 vs 静态（CPLEX）", "summary_cplex.json"),
     ("dynamic_only", "仅动态策略", "summary_dynamic.json"),
 ]
+
+BENCHMARK_MERGE_FILES: Dict[str, List[str]] = {
+    "cplex": ["summary_lns_smoke.json"],
+    "dynamic_only": ["summary_lns_smoke.json"],
+}
 
 BENCHMARK_METRICS = [
     {"id": "score", "label": "综合得分", "direction": "desc"},
@@ -441,15 +448,7 @@ def _compare_strategies(payload: dict) -> dict:
     runs = min(5, max(1, runs))
 
     aggr: Dict[str, dict] = {}
-    strategy_names = [
-        "nearest_task_first",
-        "max_task_first",
-        "urgency_distance",
-        "auction_multi_agent",
-        "metaheuristic_sa",
-        "reinforcement_q",
-        "hyper_heuristic_ucb",
-    ]
+    strategy_names = list(STRATEGY_REGISTRY.keys())
     for name in strategy_names:
         aggr[name] = {
             "strategy": name,
@@ -469,13 +468,8 @@ def _compare_strategies(payload: dict) -> dict:
             weather_mode=weather_mode,
         )
         strategy_instances = [
-            NearestTaskFirstStrategy(),
-            MaxWeightFirstStrategy(),
-            UrgencyDistanceStrategy(),
-            AuctionBasedStrategy(),
-            SimulatedAnnealingStrategy(seed=scenario_seed),
-            ReinforcementLearningDispatchStrategy(seed=scenario_seed + 1),
-            HyperHeuristicStrategy(seed=scenario_seed + 2),
+            _build_strategy_instance(name, scenario_seed + strategy_idx)
+            for strategy_idx, name in enumerate(strategy_names)
         ]
         outputs = run_strategies_for_scenario(scenario, strategy_instances)
         for summary, _, _ in outputs:
@@ -613,7 +607,7 @@ def _weather_stats(payload: dict) -> dict:
 
 def _build_strategy_instance(strategy_name: str, seed: int):
     cls = STRATEGY_REGISTRY.get(strategy_name, UrgencyDistanceStrategy)
-    if cls in {SimulatedAnnealingStrategy, ReinforcementLearningDispatchStrategy, HyperHeuristicStrategy}:
+    if cls in {SimulatedAnnealingStrategy, LargeNeighborhoodSearchStrategy, ReinforcementLearningDispatchStrategy, HyperHeuristicStrategy}:
         return cls(seed=seed)
     return cls()
 
@@ -1134,6 +1128,7 @@ def _load_benchmark_payload() -> dict:
     for key, label, filename in BENCHMARK_PRESETS:
         dataset = _read_benchmark_dataset(key=key, label=label, path=RESULTS_DIR / filename)
         if dataset is not None:
+            _merge_benchmark_dataset_rows(dataset, BENCHMARK_MERGE_FILES.get(key, []))
             datasets.append(dataset)
             seen_names.add(filename.lower())
 
@@ -1160,6 +1155,49 @@ def _load_benchmark_payload() -> dict:
             "metric": "score",
         },
     }
+
+
+def _merge_benchmark_dataset_rows(dataset: dict, filenames: List[str]) -> None:
+    rows = dataset.get("rows")
+    if not isinstance(rows, list):
+        return
+
+    existing_keys = {
+        (
+            str(row.get("scenario", "")),
+            str(row.get("strategy", "")),
+            str(row.get("mode", "")),
+            int(row.get("seed", 0) or 0),
+        )
+        for row in rows
+        if isinstance(row, dict)
+    }
+    source_files = [str(dataset.get("filename", ""))]
+
+    for filename in filenames:
+        path = RESULTS_DIR / filename
+        extra = _read_benchmark_dataset(key=f"{dataset.get('key', 'extra')}:{filename}", label=filename, path=path)
+        if extra is None:
+            continue
+        source_files.append(filename)
+        for row in extra.get("rows", []):
+            if not isinstance(row, dict):
+                continue
+            merge_key = (
+                str(row.get("scenario", "")),
+                str(row.get("strategy", "")),
+                str(row.get("mode", "")),
+                int(row.get("seed", 0) or 0),
+            )
+            if merge_key in existing_keys:
+                continue
+            existing_keys.add(merge_key)
+            rows.append(row)
+
+    dataset["row_count"] = len(rows)
+    dataset["merged_files"] = source_files
+    if len(source_files) > 1:
+        dataset["filename"] = " + ".join(source_files)
 
 
 def _read_benchmark_dataset(key: str, label: str, path: Path) -> dict | None:

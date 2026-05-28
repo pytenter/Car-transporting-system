@@ -310,6 +310,121 @@ class SimulatedAnnealingStrategy(DispatchStrategy):
         return DispatchDecision(task=collab_candidates[0][1], vehicle_ids=collab_candidates[0][2])
 
 
+class LargeNeighborhoodSearchStrategy(DispatchStrategy):
+    name = "lns_aaai_2025"
+
+    def __init__(self, seed: int = 2026, iterations: int = 72) -> None:
+        self._rnd = random.Random(seed)
+        self._iterations = max(12, int(iterations))
+
+    def choose(
+        self,
+        pending_tasks: Sequence[Task],
+        free_vehicle_ids: Sequence[int],
+        vehicles: Dict[int, Vehicle],
+        graph: WeightedGraph,
+        allow_collaboration: bool,
+        now: int,
+    ) -> Optional[DispatchDecision]:
+        if not pending_tasks or not free_vehicle_ids:
+            return None
+
+        pair_pool: List[tuple[float, Task, int, dict[str, float]]] = []
+        for task in pending_tasks:
+            for vehicle_id in free_vehicle_ids:
+                vehicle = vehicles[vehicle_id]
+                if vehicle.capacity + 1e-9 < task.weight:
+                    continue
+                feat = _pair_features(task, vehicle, graph, now)
+                if feat is None:
+                    continue
+                base_score = _estimate_pair_value(task, vehicle, graph, now)
+                pair_pool.append((base_score, task, vehicle_id, feat))
+
+        if pair_pool:
+            pair_pool.sort(key=lambda item: item[0], reverse=True)
+            shortlist_size = min(len(pair_pool), max(8, len(free_vehicle_ids) * 5))
+            shortlist = pair_pool[:shortlist_size]
+
+            incumbent = shortlist[0]
+            best = incumbent
+            temp = 9.0
+
+            for _ in range(self._iterations):
+                destroyed = self._destroy(shortlist, incumbent)
+                repaired = self._repair(destroyed, incumbent)
+                if repaired is None:
+                    continue
+
+                repaired_score = repaired[0]
+                incumbent_score = incumbent[0]
+                delta = repaired_score - incumbent_score
+                if delta >= 0.0 or self._rnd.random() < math.exp(delta / max(0.001, temp)):
+                    incumbent = repaired
+                if incumbent[0] > best[0]:
+                    best = incumbent
+                temp *= 0.965
+
+            return DispatchDecision(task=best[1], vehicle_ids=[best[2]])
+
+        if allow_collaboration:
+            collab = _best_collab_decision(pending_tasks, free_vehicle_ids, vehicles, graph, now)
+            if collab is not None:
+                return collab
+        return None
+
+    def _destroy(
+        self,
+        shortlist: Sequence[tuple[float, Task, int, dict[str, float]]],
+        incumbent: tuple[float, Task, int, dict[str, float]],
+    ) -> List[tuple[float, Task, int, dict[str, float]]]:
+        if len(shortlist) <= 2:
+            return list(shortlist)
+
+        remove_count = max(1, int(len(shortlist) * self._rnd.uniform(0.20, 0.55)))
+        removed_indexes = set(self._rnd.sample(range(len(shortlist)), k=min(remove_count, len(shortlist) - 1)))
+        kept = [item for idx, item in enumerate(shortlist) if idx not in removed_indexes]
+
+        focused = [
+            item
+            for item in kept
+            if item[1].task_id == incumbent[1].task_id or item[2] == incumbent[2]
+        ]
+        if focused and self._rnd.random() < 0.42:
+            return focused
+        return kept
+
+    def _repair(
+        self,
+        candidates: Sequence[tuple[float, Task, int, dict[str, float]]],
+        incumbent: tuple[float, Task, int, dict[str, float]],
+    ) -> tuple[float, Task, int, dict[str, float]] | None:
+        if not candidates:
+            return None
+
+        weight_noise = 1.0 + self._rnd.uniform(-0.16, 0.16)
+        urgency_noise = 1.0 + self._rnd.uniform(-0.20, 0.24)
+        lateness_noise = 1.0 + self._rnd.uniform(-0.18, 0.25)
+
+        best: tuple[float, Task, int, dict[str, float]] | None = None
+        for base_score, task, vehicle_id, feat in candidates:
+            repair_score = (
+                base_score
+                + 18.0 * weight_noise * task.weight
+                + 780.0 * urgency_noise * feat["urgency"]
+                - 5.6 * lateness_noise * feat["lateness"]
+                + 7.0 * feat["battery_margin"]
+            )
+            if task.task_id == incumbent[1].task_id:
+                repair_score += 9.0
+            if vehicle_id == incumbent[2]:
+                repair_score += 5.0
+            repair_score += self._rnd.uniform(-6.0, 6.0)
+            if best is None or repair_score > best[0]:
+                best = (repair_score, task, vehicle_id, feat)
+        return best
+
+
 class ReinforcementLearningDispatchStrategy(DispatchStrategy):
     name = "reinforcement_q"
 

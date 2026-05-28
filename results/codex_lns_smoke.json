@@ -1,0 +1,53 @@
+[
+  {
+    "scenario": "small",
+    "strategy": "lns_aaai_2025",
+    "mode": "dynamic",
+    "completed": 14,
+    "unserved": 0,
+    "overtime": 1,
+    "distance": 1379.0970971301037,
+    "avg_response_time": 82.42840657148352,
+    "charging_wait": 0.0,
+    "score": 1756.5717020916154,
+    "score_std": 0.0,
+    "station_utilization": {
+      "0": 0.0,
+      "1": 0.0,
+      "2": 0.0,
+      "-1": 0.0
+    },
+    "station_avg_utilization": {
+      "0": 0.02153959663002282,
+      "1": 0.04708017912956127,
+      "2": 0.004756165515928438,
+      "-1": 0.0945834497107741
+    },
+    "station_peak_utilization": {
+      "0": 0.3333333333333333,
+      "1": 0.5,
+      "2": 0.3333333333333333,
+      "-1": 0.6666666666666666
+    },
+    "station_charging_sessions": {
+      "0": 4.0,
+      "1": 3.0,
+      "2": 1.0,
+      "-1": 14.0
+    },
+    "station_max_wait_time": {
+      "0": 0.0,
+      "1": 0.0,
+      "2": 0.0,
+      "-1": 0.0
+    },
+    "charging_sessions": 22.0,
+    "max_charging_wait": 0.0,
+    "collaborative_tasks": 0.0,
+    "collaborative_task_ratio": 0.0,
+    "max_vehicles_per_task": 1.0,
+    "seed": 20260309,
+    "seed_runs": 1,
+    "allow_collaboration": false
+  }
+]

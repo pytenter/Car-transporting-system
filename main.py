@@ -13,6 +13,7 @@ from simulator.simulation import SCENARIO_SCALES, ScenarioData, build_scenario, 
 from simulator.strategies import (
     AuctionBasedStrategy,
     HyperHeuristicStrategy,
+    LargeNeighborhoodSearchStrategy,
     MaxWeightFirstStrategy,
     NearestTaskFirstStrategy,
     ReinforcementLearningDispatchStrategy,
@@ -27,6 +28,7 @@ STRATEGY_REGISTRY = {
     "urgency_distance": UrgencyDistanceStrategy,
     "auction_multi_agent": AuctionBasedStrategy,
     "metaheuristic_sa": SimulatedAnnealingStrategy,
+    "lns_aaai_2025": LargeNeighborhoodSearchStrategy,
     "reinforcement_q": ReinforcementLearningDispatchStrategy,
     "hyper_heuristic_ucb": HyperHeuristicStrategy,
 }
@@ -113,7 +115,7 @@ def build_strategy_instances(names: List[str], seed: int) -> list:
     strategies = []
     for idx, name in enumerate(names):
         cls = STRATEGY_REGISTRY[name]
-        if name in {"metaheuristic_sa", "reinforcement_q", "hyper_heuristic_ucb"}:
+        if name in {"metaheuristic_sa", "lns_aaai_2025", "reinforcement_q", "hyper_heuristic_ucb"}:
             strategies.append(cls(seed=seed + idx))
         else:
             strategies.append(cls())

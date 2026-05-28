@@ -56,6 +56,7 @@ const STRATEGY_ZH = {
   urgency_distance: "紧急度-距离综合",
   auction_multi_agent: "多智能体拍卖",
   metaheuristic_sa: "模拟退火",
+  lns_aaai_2025: "大邻域搜索(LNS)",
   reinforcement_q: "Q 学习派单",
   hyper_heuristic_ucb: "超启发式(UCB)",
   static_exact_fullinfo: "静态·全信息(精确解)",
