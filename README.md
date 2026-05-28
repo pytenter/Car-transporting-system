@@ -16,12 +16,13 @@
 ## 核心能力
 
 - 支持 `small / medium / large` 三种基础场景规模，并提供 `stress` 充电压力场景用于展示排队与负荷。
-- 支持 7 种动态调度策略：
+- 支持 8 种动态调度策略：
   - `nearest_task_first`
   - `max_task_first`
   - `urgency_distance`
   - `auction_multi_agent`
   - `metaheuristic_sa`
+  - `lns_aaai_2025`
   - `reinforcement_q`
   - `hyper_heuristic_ucb`
 - 车辆约束建模：载重、电池容量、速度、单位里程能耗、可用时刻。
@@ -110,7 +111,7 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    S1[构建 small/medium/large 场景] --> S2[运行 7 种动态策略]
+    S1[构建 small/medium/large 场景] --> S2[运行 8 种动态策略]
     S2 --> S3[统计 completed / unserved / overtime]
     S2 --> S4[统计 distance / response / charging_wait / score]
     S1 --> S5[CPLEX 静态全信息基线]
@@ -145,7 +146,7 @@ flowchart LR
 
 - 规则启发式：最近任务优先、最大任务优先、紧急度-距离综合。
 - 多智能体启发式：拍卖式派单。
-- 近似优化/学习策略：模拟退火、Q-learning、UCB 超启发式。
+- 近似优化/学习策略：模拟退火、大邻域搜索（LNS）、Q-learning、UCB 超启发式。
 - 协同派单场景下，系统可将超重任务分配给多辆车共同执行，并按容量比例分摊载重。
 
 ### 4. 精确基线
@@ -268,13 +269,14 @@ python main.py --no-oracle --allow-collaboration --seed-runs 3 --output results/
 ### 2.1 运行充电压力场景
 
 ```bash
-python main.py --no-oracle --scales stress --strategies nearest_task_first urgency_distance hyper_heuristic_ucb --allow-collaboration --export-events --output results/summary_stress.json --events-output results/events_stress.json
+python main.py --no-oracle --scales stress --strategies nearest_task_first urgency_distance lns_aaai_2025 hyper_heuristic_ucb --allow-collaboration --export-events --output results/summary_stress.json --events-output results/events_stress.json
 ```
 
 说明：
 
 - `stress` 场景会降低初始电量和充电资源，强化充电站排队、负荷压力和协同任务展示。
 - 输出中可重点查看 `charging_sessions`、`max_charging_wait`、`station_avg_utilization`、`station_peak_utilization`、`collaborative_tasks`。
+- `lns_aaai_2025` 是新增的大邻域搜索策略，可用于对比破坏-修复式局部重优化在压力场景下的表现。
 
 ### 3. 运行动态 vs 静态（CPLEX）对比
 
@@ -384,7 +386,7 @@ python dashboard.py
 ## 适合在答辩/报告中强调的亮点
 
 - 从数据结构、调度算法、离散事件仿真到前端回放形成完整闭环。
-- 不是单一启发式，而是同时比较规则法、拍卖式、多策略超启发式与学习策略。
+- 不是单一启发式，而是同时比较规则法、拍卖式、模拟退火、大邻域搜索、多策略超启发式与学习策略。
 - 显式建模了新能源车场景中的关键现实约束：电量、充电等待、天气扰动、多车协同。
 - 同时提供在线动态策略和 CPLEX 静态全信息基线，便于讨论“实时可行性”与“全局优化基准”之间的差距。
 
